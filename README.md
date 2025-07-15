@@ -14,27 +14,52 @@ The script retrieves configuration data from Microsoft Graph API and Azure Resou
 3. **Python Environment**: Ensure Python 3.6+ is installed with the `requests` and `azure-identity` libraries
 
 ### Setup Steps
-1. **Generate access tokens** using the provided script:
-   ```bash
-   python get_access_tokens.py
-   ```
-   
-   This will automatically create the `access_tokens.json` file with the required format:
-   ```json
-   {
-     "graph": "your_microsoft_graph_access_token_here",
-     "arm": "your_azure_resource_manager_access_token_here"
-   }
+
+#### 1. Configure Azure AD Application Credentials
+
+Before running the token generation script, you must configure your Azure AD application credentials:
+
+1. **Edit `get_access_tokens.py`** and set your Azure AD application details:
+   ```python
+   CLIENT_ID = "your-client-id-here"
+   CLIENT_SECRET = "your-client-secret-here"
+   TENANT_ID = "your-tenant-id-here"
    ```
 
-2. **Update script parameters** (optional):
-   - Modify the `subscription_id`, `resource_group`, and `workspace_name` variables in the `main()` function
-   - Adjust the `max_lines` parameter to control output length
+2. **Get these values from Azure Portal:**
+   - Go to Azure Portal > Azure Active Directory > App registrations
+   - Select your registered application
+   - Copy the Application (client) ID
+   - Go to Certificates & secrets > New client secret
+   - Copy the Directory (tenant) ID
 
-3. **Run the main script**:
-   ```bash
-   python entra_security_policies.py
-   ```
+3. **Required Permissions:**
+   - Microsoft Graph: See complete list in section 2(a) below
+   - Azure Resource Manager: `Reader` role on subscription
+
+#### 2. Generate Access Tokens
+
+Run the token generation script:
+```bash
+python get_access_tokens.py
+```
+
+This will automatically create the `access_tokens.json` file with the required format:
+```json
+{
+  "graph": "your_microsoft_graph_access_token_here",
+  "arm": "your_azure_resource_manager_access_token_here"
+}
+```
+
+#### 3. Update Script Parameters (Optional)
+- Modify the `subscription_id`, `resource_group`, and `workspace_name` variables in the `main()` function
+- Adjust the `max_lines` parameter to control output length
+
+#### 4. Run the Main Script
+```bash
+python entra_security_policies.py
+```
 
 ### Output
 - The script outputs results to both console and `out.txt` file
@@ -76,7 +101,7 @@ The script retrieves configuration data from Microsoft Graph API and Azure Resou
 - Intrusion Detection Systems (Microsoft Defender for Cloud integration with Microsoft Sentinel, data connector configuration, alert ingestion)
 - Logical Access Review (Microsoft Entra ID Identity Governance access reviews, recurring review configurations, automatic user removal settings)
 - Logical Access Revocation (automated offboarding processes, credential revocation tracking, 24-hour compliance monitoring)
-- Microsoft Graph API Permissions Check (available permissions validation and troubleshooting)
+- Access Token Expiry Check (token validation and troubleshooting)
 - Microsoft Entra Password Protection Policy (banned password list and minimum length settings)
 - Azure Policy Assignments and Defender for Cloud Status (policy-based security controls and cloud workload protection)
 - CIS L1 Initiative Assignment Check (CIS security benchmarks compliance)
@@ -172,11 +197,14 @@ The script uses the following API endpoints:
 - /auditLogs/directoryAudits (with various filters for credential distribution, access reviews, etc.)
 - /groups (for group membership and access control)
 - /directoryRoles (for administrative role assignments)
+- /auditLogs/directoryAudits (with various filters for access review events, user removal events, etc.)
+- /identityGovernance/accessReviews/definitions/{reviewId}/instances (for access review instances)
+- /identityGovernance/lifecycleWorkflows/workflows (for automated offboarding workflows)
 
 ### Azure Resource Manager (ARM) API Endpoints:
 - /subscriptions/{subscriptionId}/resourceGroups/{resourceGroup}/providers/Microsoft.Network/bastionHosts?api-version=2023-05-01
 - /subscriptions/{subscriptionId}/providers/Microsoft.Authorization/policyAssignments
-- /subscriptions/{subscriptionId}/providers/Microsoft.Security/pricings?api-version=2022-03-01-preview
+- /subscriptions/{subscriptionId}/providers/Microsoft.Security/pricings?api-version=2024-01-01
 - /subscriptions/{subscriptionId}/resourceGroups/{resourceGroup}/providers/Microsoft.OperationalInsights/workspaces/{workspaceName}?api-version=2022-10-01
 - /subscriptions/{subscriptionId}/resourceGroups/{resourceGroup}/providers/Microsoft.OperationalInsights/workspaces/{workspaceName}/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01
 - /subscriptions/{subscriptionId}/resourceGroups/{resourceGroup}/providers/Microsoft.OperationalInsights/workspaces/{workspaceName}/providers/Microsoft.SecurityInsights/alertRules?api-version=2022-12-01-preview
@@ -197,4 +225,10 @@ The script uses the following API endpoints:
 - /subscriptions/{subscriptionId}/providers/Microsoft.Resources/deployments?api-version=2021-04-01
 - /subscriptions/{subscriptionId}/providers/Microsoft.Security/assessments?api-version=2020-01-01
 - /subscriptions/{subscriptionId}/providers/Microsoft.Security/alerts?api-version=2020-01-01
-- /subscriptions/{subscriptionId}/providers/microsoft.insights/eventTypes/management/values?api-version=2015-04-01 
+- /subscriptions/{subscriptionId}/providers/microsoft.insights/eventTypes/management/values?api-version=2015-04-01
+- /subscriptions/{subscriptionId}/providers/Microsoft.Security/settings?api-version=2022-05-01
+- /subscriptions/{subscriptionId}/providers/Microsoft.Policy/stateChanges?api-version=2022-06-01
+- /subscriptions/{subscriptionId}/providers/Microsoft.Web/certificates?api-version=2022-03-01
+- /subscriptions/{subscriptionId}/resourceGroups/{resourceGroup}/providers/Microsoft.RecoveryServices/vaults/{vaultName}/backupPolicies?api-version=2022-08-01
+- /subscriptions/{subscriptionId}/resourceGroups/{resourceGroup}/providers/Microsoft.Resources/deployments?api-version=2021-04-01
+- /subscriptions/{subscriptionId}/resourceGroups/{resourceGroup}/providers/Microsoft.Cdn/profiles/{profileName}/endpoints?api-version=2021-06-01 
