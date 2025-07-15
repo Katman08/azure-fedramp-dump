@@ -10,11 +10,16 @@ The script retrieves configuration data from Microsoft Graph API and Azure Resou
 
 ### Prerequisites
 1. **Azure AD Application Registration**: Create an app registration in Azure AD with the required permissions (see section 2 below)
-2. **Access Tokens**: Generate access tokens for both Microsoft Graph and ARM APIs
-3. **Python Environment**: Ensure Python 3.6+ is installed with the `requests` library
+2. **Access Tokens**: Generate access tokens for both Microsoft Graph and ARM APIs using the provided `get_access_tokens.py` script
+3. **Python Environment**: Ensure Python 3.6+ is installed with the `requests` and `azure-identity` libraries
 
 ### Setup Steps
-1. **Create access_tokens.json file** in the same directory as the script with the following format:
+1. **Generate access tokens** using the provided script:
+   ```bash
+   python get_access_tokens.py
+   ```
+   
+   This will automatically create the `access_tokens.json` file with the required format:
    ```json
    {
      "graph": "your_microsoft_graph_access_token_here",
@@ -26,7 +31,7 @@ The script retrieves configuration data from Microsoft Graph API and Azure Resou
    - Modify the `subscription_id`, `resource_group`, and `workspace_name` variables in the `main()` function
    - Adjust the `max_lines` parameter to control output length
 
-3. **Run the script**:
+3. **Run the main script**:
    ```bash
    python entra_security_policies.py
    ```
