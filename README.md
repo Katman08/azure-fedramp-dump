@@ -1,5 +1,49 @@
 # Microsoft Entra ID Security Policies Configuration Retriever
 
+## Purpose
+
+This script serves as evidence that security requirements have been fulfilled by printing the current configurations of relevant Microsoft Entra ID (Azure AD) security policies and Azure resource configurations. It is designed to support FedRAMP Moderate compliance assessments by providing automated evidence gathering for various security controls.
+
+The script retrieves configuration data from Microsoft Graph API and Azure Resource Manager (ARM) API to validate that security policies are properly configured and enforced across your Azure environment.
+
+## How to Use
+
+### Prerequisites
+1. **Azure AD Application Registration**: Create an app registration in Azure AD with the required permissions (see section 2 below)
+2. **Access Tokens**: Generate access tokens for both Microsoft Graph and ARM APIs
+3. **Python Environment**: Ensure Python 3.6+ is installed with the `requests` library
+
+### Setup Steps
+1. **Create access_tokens.json file** in the same directory as the script with the following format:
+   ```json
+   {
+     "graph": "your_microsoft_graph_access_token_here",
+     "arm": "your_azure_resource_manager_access_token_here"
+   }
+   ```
+
+2. **Update script parameters** (optional):
+   - Modify the `subscription_id`, `resource_group`, and `workspace_name` variables in the `main()` function
+   - Adjust the `max_lines` parameter to control output length
+
+3. **Run the script**:
+   ```bash
+   python entra_security_policies.py
+   ```
+
+### Output
+- The script outputs results to both console and `out.txt` file
+- Each control assessment includes:
+  - ✓ Success indicators for properly configured controls
+  - ✗ Failure indicators for missing or misconfigured controls
+  - ⚠️ Warning indicators for potential compliance gaps
+  - Detailed configuration information and recommendations
+
+### Customization
+- Comment/uncomment specific function calls in the `main()` function to run only desired assessments
+- Modify the `max_lines` parameter to control output verbosity
+- Add new assessment functions following the existing pattern
+
 ## 1. The script currently reads and logs the configurations of the following controls and policies:
 
 - Smart Lockout Defaults
@@ -115,8 +159,8 @@ The script uses the following API endpoints:
 - /deviceManagement/managedDevices
 - /policies/authenticationMethodsPolicy
 - /policies
-- /security/secureScoreControlProfiles
-- /security/alerts
+- https://graph.microsoft.com/v1.0/security/secureScoreControlProfiles
+- https://graph.microsoft.com/v1.0/security/alerts
 - /identityGovernance/lifecycleWorkflows/workflows
 - /identityGovernance/accessReviews/definitions
 - /auditLogs/directoryAudits (with various filters for revocation events)
