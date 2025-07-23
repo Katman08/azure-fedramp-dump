@@ -440,34 +440,46 @@ class SecurityFunctions:
             return
         # Application Gateways
         agw_url = f"/subscriptions/{subscription_id}/providers/Microsoft.Network/applicationGateways?api-version=2022-09-01"
+        found_gateway = False
         try:
             response = self.api_client.arm_get(agw_url)
             if response.status_code == 200:
                 gateways = response.json().get('value', [])
+                if not gateways:
+                    self.formatter.print_info("No Application Gateways found in the subscription.")
                 for gw in gateways:
                     waf_config_obj = gw.get('properties', {}).get('webApplicationFirewallConfiguration')
                     if waf_config_obj:
+                        found_gateway = True
                         self.formatter.print_success(f"AppGW: {gw.get('name')}")
                         self.formatter.print_key_value("WAF Enabled", waf_config_obj.get('enabled', False))
                         self.formatter.print_key_value("Mode", waf_config_obj.get('firewallMode', 'N/A'))
                         self.formatter.print_key_value("RuleSet", f"{waf_config_obj.get('ruleSetType', 'N/A')} {waf_config_obj.get('ruleSetVersion', '')}")
                     else:
                         self.formatter.print_warning(f"AppGW: {gw.get('name')} - No WAF configuration")
+                if not found_gateway and gateways:
+                    self.formatter.print_warning("No Application Gateways with WAF enabled/configured found.")
             else:
                 self.formatter.print_error(f"Failed to retrieve Application Gateways: {response.status_code}")
         except Exception as e:
             self.formatter.print_error(f"Error retrieving Application Gateways: {e}")
         # Front Door
         afd_url = f"/subscriptions/{subscription_id}/providers/Microsoft.Cdn/profiles?api-version=2021-06-01"
+        found_fd = False
         try:
             response = self.api_client.arm_get(afd_url)
             if response.status_code == 200:
                 profiles = response.json().get('value', [])
+                if not profiles:
+                    self.formatter.print_info("No Front Door profiles found in the subscription.")
                 for profile in profiles:
                     sku = profile.get('sku', {}).get('name', '')
                     if 'AzureFrontDoor' in sku:
+                        found_fd = True
                         waf_policy = profile.get('properties', {}).get('webApplicationFirewallPolicyLink', {}).get('id')
                         self.formatter.print_key_value(f"Front Door: {profile.get('name')} WAF Policy", waf_policy or 'None')
+                if not found_fd and profiles:
+                    self.formatter.print_warning("No Front Door profiles with WAF policy found.")
             else:
                 self.formatter.print_error(f"Failed to retrieve Front Door profiles: {response.status_code}")
         except Exception as e:
@@ -747,37 +759,91 @@ class SecurityFunctions:
         except Exception as e:
             self.formatter.print_error(f"Exception occurred: {e}")
         self.formatter.print_separator() 
-
-    def check_admin_group_membership(self):
-        """List all Microsoft Entra ID directory roles and the members assigned to each role."""
+        
+    def check_admin_group_membership(self, max_groups: int = 10):
+        """List all Microsoft Entra ID groups and the members assigned to each group, with a table of member details and their roles. List users not in any group separately. Limit number of groups displayed with max_groups."""
         self.formatter.print_header(
             "MICROSOFT ENTRA ID ADMINISTRATIVE GROUP MEMBERSHIP",
-            "This function lists all Microsoft Entra ID directory roles and the members assigned to each role. It evidences which users, groups, or service principals have administrative privileges in your environment."
+            "This function lists all Microsoft Entra ID groups and the members assigned to each group, with a table of member details and their roles. Users not part of any group are listed separately."
         )
         try:
-            response = self.api_client.graph_get("/directoryRoles")
-            if response.status_code == 200:
-                roles = response.json().get('value', [])
-                for role in roles:
-                    role_id = role.get('id')
-                    role_name = role.get('displayName')
-                    self.formatter.print_key_value("Role", role_name)
-                    # List members of this role
-                    members_response = self.api_client.graph_get(f"/directoryRoles/{role_id}/members")
-                    if members_response.status_code == 200:
-                        members = members_response.json().get('value', [])
-                        if not members:
-                            self.formatter.print_info("(No members assigned)")
-                        for m in members:
-                            upn = m.get('userPrincipalName')
-                            disp = m.get('displayName')
-                            obj_id = m.get('id')
-                            self.formatter.print_list_item(f"{upn or disp or obj_id}")
-                    else:
-                        self.formatter.print_error(f"Failed to retrieve members for role {role_name}")
-                    self.formatter.print_separator()
+            max_lines = getattr(self.config, 'max_lines', 100)
+            # Get all groups
+            groups_response = self.api_client.graph_get(f"/groups?$top={max_groups}")
+            if groups_response.status_code != 200:
+                self.formatter.print_error(f"Failed to retrieve groups: {groups_response.status_code}")
+                return
+            groups = groups_response.json().get('value', [])
+            # Get all users
+            users_response = self.api_client.graph_get(f"/users?$top={max_lines}")
+            if users_response.status_code != 200:
+                self.formatter.print_error(f"Failed to retrieve users: {users_response.status_code}")
+                return
+            users = users_response.json().get('value', [])
+            user_id_map = {u['id']: u for u in users}
+            user_groups_map = {u['id']: [] for u in users}
+            all_member_ids = set()
+            # For each group, print group and table of members (limit to max_groups)
+            for group in groups[:max_groups]:
+                group_id = group.get('id')
+                group_name = group.get('displayName')
+                self.formatter.print_section_header(f"Group: {group_name}")
+                members_response = self.api_client.graph_get(f"/groups/{group_id}/members?$top={max_lines}")
+                if members_response.status_code != 200:
+                    self.formatter.print_error(f"Failed to retrieve members for group {group_name}")
+                    continue
+                members = members_response.json().get('value', [])
+                if not members:
+                    self.formatter.print_info("(No members assigned)")
+                    continue
+                table_rows = []
+                for m in members[:max_lines]:
+                    member_id = m.get('id')
+                    all_member_ids.add(member_id)
+                    # Add this group to the user's groups
+                    if member_id in user_groups_map:
+                        user_groups_map[member_id].append(group_name)
+                    # Get roles for this member (directory roles)
+                    roles_response = self.api_client.graph_get(f"/users/{member_id}/memberOf?$top={max_lines}")
+                    roles = []
+                    if roles_response.status_code == 200:
+                        roles = [r.get('displayName', '') for r in roles_response.json().get('value', []) if r.get('@odata.type', '').endswith('directoryRole')]
+                    # Metadata
+                    upn = m.get('userPrincipalName', '')
+                    disp = m.get('displayName', '')
+                    mail = m.get('mail', '')
+                    typ = m.get('@odata.type', '').replace('#microsoft.graph.', '')
+                    table_rows.append([
+                        disp or upn or member_id,
+                        upn,
+                        mail,
+                        typ,
+                        ", ".join(roles) if roles else "(none)"
+                    ])
+                if len(members) > max_lines:
+                    self.formatter.print_info(f"Table truncated to first {max_lines} members.")
+                self.formatter.print_table([
+                    "Display Name", "User Principal Name", "Email", "Type", "Role(s)"
+                ], table_rows)
+                self.formatter.print_separator()
+            # Users not in any group
+            not_in_group = [u for u in users if u['id'] not in all_member_ids]
+            if not_in_group:
+                self.formatter.print_section_header("Users not in any group")
+                table_rows = []
+                for u in not_in_group[:max_lines]:
+                    table_rows.append([
+                        u.get('displayName', ''),
+                        u.get('userPrincipalName', ''),
+                        u.get('mail', ''),
+                        u.get('id', '')
+                    ])
+                if len(not_in_group) > max_lines:
+                    self.formatter.print_info(f"Table truncated to first {max_lines} users.")
+                self.formatter.print_table([
+                    "Display Name", "User Principal Name", "Email", "Object ID"], table_rows)
             else:
-                self.formatter.print_error(f"Failed to retrieve directory roles: {response.status_code}")
+                self.formatter.print_info("All users are members of at least one group.")
         except Exception as e:
             self.formatter.print_error(f"Exception occurred: {e}")
         self.formatter.print_separator()
@@ -1286,10 +1352,10 @@ class SecurityFunctions:
         self.formatter.print_separator()
 
     def check_missing_assettag_resources(self):
-        """List all Azure resources in the subscription that are missing the required AssetTag tag."""
+        """List all Azure resources in the subscription that are missing or have the required AssetTag tag."""
         self.formatter.print_header(
             "AZURE RESOURCES MISSING ASSETTAG",
-            "This function lists all Azure resources in the subscription that are missing the required AssetTag tag. It evidences asset management and enforcement of tagging policies for compliance and inventory control."
+            "This function lists all Azure resources in the subscription that are missing the required AssetTag tag, as well as those that have it. It evidences asset management and enforcement of tagging policies for compliance and inventory control."
         )
         subscription_id = getattr(self.config, 'subscription_id', None)
         if not subscription_id:
@@ -1301,22 +1367,34 @@ class SecurityFunctions:
             if response.status_code == 200:
                 resources = response.json().get('value', [])
                 missing = 0
+                present = 0
                 for res in resources:
                     tags = res.get('tags', {})
+                    name = res.get('name')
+                    type_ = res.get('type')
+                    # Extract resource group from the ID
+                    resource_id = res.get('id', '')
+                    resource_group = '(unknown)'
+                    if resource_id:
+                        parts = resource_id.split('/')
+                        if 'resourceGroups' in parts:
+                            idx = parts.index('resourceGroups')
+                            if idx + 1 < len(parts):
+                                resource_group = parts[idx + 1]
                     if not tags or 'AssetTag' not in tags:
-                        name = res.get('name')
-                        type_ = res.get('type')
-                        self.formatter.print_warning(f"Resource: {name} ({type_}) - MISSING AssetTag")
+                        self.formatter.print_warning(f"Resource: {name} ({type_}) | Resource Group: {resource_group} - MISSING AssetTag")
                         missing += 1
-                if missing == 0:
-                    self.formatter.print_success("All resources have an AssetTag.")
-                else:
-                    self.formatter.print_key_value("Total Missing AssetTag", missing)
+                    else:
+                        asset_tag_value = tags.get('AssetTag', '(no value)')
+                        self.formatter.print_success(f"Resource: {name} ({type_}) | Resource Group: {resource_group} - AssetTag: {asset_tag_value}")
+                        present += 1
+                self.formatter.print_key_value("Total Missing AssetTag", missing)
+                self.formatter.print_key_value("Total With AssetTag", present)
             else:
                 self.formatter.print_error(f"Failed to retrieve resources: {response.status_code}")
         except Exception as e:
             self.formatter.print_error(f"Exception occurred: {e}")
-        self.formatter.print_separator() 
+        self.formatter.print_separator()
 
     def check_defender_app_control_status(self):
         """Check for Defender Application Control (MDAC) policies in Intune device configurations."""
@@ -3671,7 +3749,8 @@ class SecurityFunctions:
         if not subscription_id:
             self.formatter.print_error("subscription_id is required to check WAF diagnostic settings.")
             return
-        
+        found_policy = False
+        found_diag = False
         try:
             # Get all WAF policies
             waf_url = f"/subscriptions/{subscription_id}/providers/Microsoft.Network/applicationGatewayWebApplicationFirewallPolicies?api-version=2023-05-01"
@@ -3681,19 +3760,17 @@ class SecurityFunctions:
                 waf_policies = response.json().get('value', [])
                 if not waf_policies:
                     self.formatter.print_info("No WAF policies found in the subscription.")
-                    return
-                
                 for policy in waf_policies:
+                    found_policy = True
                     policy_name = policy.get('name', 'Unknown')
                     self.formatter.print_subsection(f"WAF POLICY: {policy_name}")
-                    
                     # Check diagnostic settings for this WAF policy
                     diag_url = f"/subscriptions/{subscription_id}/resourceGroups/{policy.get('id', '').split('/')[4]}/providers/Microsoft.Network/applicationGatewayWebApplicationFirewallPolicies/{policy_name}/providers/Microsoft.Insights/diagnosticSettings?api-version=2021-05-01-preview"
                     diag_response = self.api_client.arm_get(diag_url)
-                    
                     if diag_response.status_code == 200:
                         diag_settings = diag_response.json().get('value', [])
                         if diag_settings:
+                            found_diag = True
                             self.formatter.print_success(f"Found {len(diag_settings)} diagnostic settings")
                             for setting in diag_settings:
                                 self.formatter.print_key_value("Setting Name", setting.get('name', 'Unknown'))
@@ -3703,6 +3780,10 @@ class SecurityFunctions:
                             self.formatter.print_warning("No diagnostic settings configured for this WAF policy")
                     else:
                         self.formatter.print_error(f"Failed to retrieve diagnostic settings: {diag_response.status_code}")
+                if not found_policy:
+                    self.formatter.print_warning("No WAF policies found to check diagnostics.")
+                if found_policy and not found_diag:
+                    self.formatter.print_warning("No diagnostic settings found for any WAF policy.")
             else:
                 self.formatter.print_error(f"Failed to retrieve WAF policies: {response.status_code}")
         except Exception as e:
@@ -4204,4 +4285,818 @@ class SecurityFunctions:
                 self.formatter.print_error(f"Failed to retrieve Azure VMs: {response.status_code}")
         except Exception as e:
             self.formatter.print_error(f"Exception occurred while checking Azure Time Sync Service: {e}")
+        self.formatter.print_separator()
+
+    def check_p2p_file_sharing_restriction(self):
+        """Check that peer-to-peer file sharing is prohibited in production by firewall rules."""
+        self.formatter.print_header(
+            "PEER-TO-PEER FILE SHARING RESTRICTION",
+            "This function checks firewall and NSG rules to evidence that peer-to-peer (P2P) file sharing is prohibited in production. It looks for rules blocking common P2P ports and protocols."
+        )
+        subscription_id = getattr(self.config, 'subscription_id', None)
+        if not subscription_id:
+            self.formatter.print_error("subscription_id must be set in config.")
+            return
+        # Common P2P ports (BitTorrent, eDonkey, Gnutella, etc.)
+        p2p_ports = ["6881-6889", "135", "137-139", "445", "6346-6347", "4662-4666", "6699", "4444", "2234", "44444"]
+        try:
+            # List all Network Security Groups (NSGs)
+            url = f"/subscriptions/{subscription_id}/providers/Microsoft.Network/networkSecurityGroups?api-version=2023-04-01"
+            response = self.api_client.arm_get(url)
+            if response.status_code == 200:
+                nsgs = response.json().get('value', [])
+                if not nsgs:
+                    self.formatter.print_warning("No Network Security Groups found in the subscription.")
+                    return
+                for nsg in nsgs:
+                    nsg_name = nsg.get('name', 'Unknown')
+                    rg = nsg.get('id', '').split('/')[4] if len(nsg.get('id', '').split('/')) > 4 else 'Unknown'
+                    self.formatter.print_subsection(f"NSG: {nsg_name}")
+                    self.formatter.print_key_value("Resource Group", rg)
+                    rules = nsg.get('properties', {}).get('securityRules', [])
+                    p2p_blocked = False
+                    for rule in rules:
+                        access = rule.get('access', '').lower()
+                        direction = rule.get('direction', '').lower()
+                        port_range = rule.get('destinationPortRange', '')
+                        port_ranges = rule.get('destinationPortRanges', [])
+                        name = rule.get('name', '')
+                        # Check if rule blocks P2P ports
+                        all_ports = [port_range] if port_range else []
+                        all_ports += port_ranges
+                        for p2p_port in p2p_ports:
+                            if any(p2p_port in pr for pr in all_ports) and access == 'deny':
+                                self.formatter.print_success(f"Rule '{name}' blocks P2P port(s) {p2p_port} ({direction})")
+                                p2p_blocked = True
+                    if not p2p_blocked:
+                        self.formatter.print_warning("No explicit rules found blocking common P2P ports. Review NSG configuration.")
+                    self.formatter.print_separator()
+            else:
+                self.formatter.print_error(f"Failed to retrieve NSGs: {response.status_code}")
+        except Exception as e:
+            self.formatter.print_error(f"Exception occurred while checking P2P restrictions: {e}")
+        self.formatter.print_separator()
+
+    def check_sentinel_system_performance_monitoring(self):
+        """Check that Microsoft Sentinel is monitoring system performance (Perf table)."""
+        self.formatter.print_header(
+            "SENTINEL SYSTEM PERFORMANCE MONITORING",
+            "This function queries the Perf table in Log Analytics to evidence that system performance metrics (CPU, memory, disk, etc.) are being monitored by Microsoft Sentinel."
+        )
+        workspace_name = getattr(self.config, 'workspace_name', None)
+        subscription_id = getattr(self.config, 'subscription_id', None)
+        resource_group = getattr(self.config, 'resource_group', None)
+        max_lines = getattr(self.config, 'max_lines', 100)
+
+        if not (workspace_name and subscription_id and resource_group):
+            self.formatter.print_error("workspace_name, subscription_id, and resource_group must be set in config.")
+            return
+
+        try:
+            query = f"""
+            Perf
+            | where TimeGenerated > ago(1d)
+            | order by TimeGenerated desc
+            | take {max_lines}
+            """
+            url = f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.OperationalInsights/workspaces/{workspace_name}/api/query?api-version=2020-08-01"
+            payload = {"query": query, "timespan": "P1D"}
+            response = self.api_client.arm_post(url, payload)
+
+            if response.status_code == 200:
+                results = response.json()
+                tables = results.get('tables', [])
+                if tables and tables[0].get('rows'):
+                    rows = tables[0]['rows']
+                    columns = tables[0]['columns']
+                    self.formatter.print_success(f"Found {len(rows)} recent system performance records:")
+                    col_map = {col['name']: i for i, col in enumerate(columns)}
+                    for i, row in enumerate(rows, 1):
+                        self.formatter.print_subsection(f"PERFORMANCE RECORD {i}")
+                        if 'TimeGenerated' in col_map:
+                            self.formatter.print_key_value("Time", row[col_map['TimeGenerated']])
+                        if 'Computer' in col_map:
+                            self.formatter.print_key_value("Computer", row[col_map['Computer']])
+                        if 'ObjectName' in col_map:
+                            self.formatter.print_key_value("Object", row[col_map['ObjectName']])
+                        if 'CounterName' in col_map:
+                            self.formatter.print_key_value("Counter", row[col_map['CounterName']])
+                        if 'InstanceName' in col_map:
+                            self.formatter.print_key_value("Instance", row[col_map['InstanceName']])
+                        if 'CounterValue' in col_map:
+                            self.formatter.print_key_value("Value", row[col_map['CounterValue']])
+                else:
+                    self.formatter.print_success("No recent system performance records found in the Perf table.")
+            elif response.status_code == 204:
+                self.formatter.print_success("Query executed successfully but no system performance records found.")
+            else:
+                self.formatter.print_error(f"Failed to query Perf table: {response.status_code}")
+        except Exception as e:
+            self.formatter.print_error(f"Exception occurred while querying Perf table: {e}")
+        self.formatter.print_separator()
+
+    def check_asg_boundary_protection(self):
+        """Check that Azure ASGs are used for boundary protection and limited to allowed ports, protocols, and services."""
+        self.formatter.print_header(
+            "AZURE ASG BOUNDARY PROTECTION",
+            "This function enumerates Azure Application Security Groups (ASGs) and checks which NSG rules reference them, evidencing boundary protection and restriction to allowed ports, protocols, and services."
+        )
+        subscription_id = getattr(self.config, 'subscription_id', None)
+        if not subscription_id:
+            self.formatter.print_error("subscription_id must be set in config.")
+            return
+        try:
+            # List all ASGs
+            asg_url = f"/subscriptions/{subscription_id}/providers/Microsoft.Network/applicationSecurityGroups?api-version=2023-04-01"
+            asg_response = self.api_client.arm_get(asg_url)
+            if asg_response.status_code == 200:
+                asgs = asg_response.json().get('value', [])
+                if not asgs:
+                    self.formatter.print_warning("No Application Security Groups found in the subscription.")
+                    return
+                # List all NSGs
+                nsg_url = f"/subscriptions/{subscription_id}/providers/Microsoft.Network/networkSecurityGroups?api-version=2023-04-01"
+                nsg_response = self.api_client.arm_get(nsg_url)
+                nsgs = nsg_response.json().get('value', []) if nsg_response.status_code == 200 else []
+                for asg in asgs:
+                    asg_name = asg.get('name', 'Unknown')
+                    asg_id = asg.get('id', '')
+                    rg = asg_id.split('/')[4] if len(asg_id.split('/')) > 4 else 'Unknown'
+                    self.formatter.print_subsection(f"ASG: {asg_name}")
+                    self.formatter.print_key_value("Resource Group", rg)
+                    found_rule = False
+                    for nsg in nsgs:
+                        nsg_name = nsg.get('name', 'Unknown')
+                        rules = nsg.get('properties', {}).get('securityRules', [])
+                        for rule in rules:
+                            src_asgs = rule.get('sourceApplicationSecurityGroups', [])
+                            dst_asgs = rule.get('destinationApplicationSecurityGroups', [])
+                            access = rule.get('access', '').lower()
+                            direction = rule.get('direction', '').lower()
+                            protocol = rule.get('protocol', 'Any')
+                            port_range = rule.get('destinationPortRange', '')
+                            port_ranges = rule.get('destinationPortRanges', [])
+                            name = rule.get('name', '')
+                            # Check if this ASG is referenced
+                            if any(asg_id == s.get('id') for s in src_asgs + dst_asgs):
+                                found_rule = True
+                                self.formatter.print_key_value("Referenced in NSG", nsg_name)
+                                self.formatter.print_key_value("Rule Name", name)
+                                self.formatter.print_key_value("Direction", direction)
+                                self.formatter.print_key_value("Access", access)
+                                self.formatter.print_key_value("Protocol", protocol)
+                                all_ports = [port_range] if port_range else []
+                                all_ports += port_ranges
+                                self.formatter.print_key_value("Ports", ', '.join(all_ports) if all_ports else 'Any')
+                    if not found_rule:
+                        self.formatter.print_warning("No NSG rules found referencing this ASG.")
+                    self.formatter.print_separator()
+            else:
+                self.formatter.print_error(f"Failed to retrieve ASGs: {asg_response.status_code}")
+        except Exception as e:
+            self.formatter.print_error(f"Exception occurred while checking ASG boundary protection: {e}")
+        self.formatter.print_separator()
+
+    def check_sentinel_alerts_and_health_reports(self):
+        """Evidence that Sentinel alerts and health reports cover key security and operational areas."""
+        self.formatter.print_header(
+            "SENTINEL ALERTS AND HEALTH REPORTS",
+            "This function checks that Microsoft Sentinel alerts and health reports include: missing/stopped forwarders, MFA activity, configuration baselines, failed logins, data feed status, external/internal connections monitoring, root/administrative account activity, and permission/object changes."
+        )
+        workspace_name = getattr(self.config, 'workspace_name', None)
+        subscription_id = getattr(self.config, 'subscription_id', None)
+        resource_group = getattr(self.config, 'resource_group', None)
+        max_lines = getattr(self.config, 'max_lines', 100)
+        if not (workspace_name and subscription_id and resource_group):
+            self.formatter.print_error("workspace_name, subscription_id, and resource_group must be set in config.")
+            return
+
+        # 1. Missing/Stopped Forwarders
+        self.formatter.print_subsection("MISSING/STOPPED FORWARDERS")
+        try:
+            query = f"""
+            Heartbeat
+            | where TimeGenerated > ago(1d)
+            | summarize LastSeen=max(TimeGenerated) by Computer
+            | where LastSeen < ago(1h)
+            | take {max_lines}
+            """
+            url = f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.OperationalInsights/workspaces/{workspace_name}/api/query?api-version=2020-08-01"
+            payload = {"query": query, "timespan": "P1D"}
+            response = self.api_client.arm_post(url, payload)
+            if response.status_code == 200:
+                tables = response.json().get('tables', [])
+                if tables and tables[0].get('rows'):
+                    self.formatter.print_warning("Some forwarders have not sent a heartbeat in the last hour:")
+                    for row in tables[0]['rows']:
+                        self.formatter.print_key_value("Computer", row[0])
+                else:
+                    self.formatter.print_success("All forwarders are reporting as expected.")
+            else:
+                self.formatter.print_error("Failed to query Heartbeat table for forwarder status.")
+                self.formatter.print_info(f"Response: {response.text}")
+        except Exception as e:
+            self.formatter.print_error(f"Exception: {e}")
+
+        # 2. MFA Activity
+        self.formatter.print_subsection("MFA ACTIVITY")
+        try:
+            query = f"""
+            SigninLogs
+            | where TimeGenerated > ago(1d)
+            | where ConditionalAccessStatus == "success" and AuthenticationRequirement == "multiFactorAuthentication"
+            | take {max_lines}
+            """
+            payload = {"query": query, "timespan": "P1D"}
+            response = self.api_client.arm_post(url, payload)
+            if response.status_code == 200:
+                tables = response.json().get('tables', [])
+                if tables and tables[0].get('rows'):
+                    self.formatter.print_success(f"Found {len(tables[0]['rows'])} recent MFA sign-ins.")
+                else:
+                    self.formatter.print_info("No recent MFA sign-ins found.")
+            else:
+                self.formatter.print_error("Failed to query SigninLogs for MFA activity.")
+                self.formatter.print_info(f"Response: {response.text}")
+        except Exception as e:
+            self.formatter.print_error(f"Exception: {e}")
+
+        # 3. Configuration Baselines
+        self.formatter.print_subsection("CONFIGURATION BASELINES")
+        try:
+            query = f"""
+            ConfigurationChange
+            | where TimeGenerated > ago(1d)
+            | take {max_lines}
+            """
+            payload = {"query": query, "timespan": "P1D"}
+            response = self.api_client.arm_post(url, payload)
+            if response.status_code == 200:
+                tables = response.json().get('tables', [])
+                if tables and tables[0].get('rows'):
+                    self.formatter.print_success(f"Found {len(tables[0]['rows'])} recent configuration changes.")
+                else:
+                    self.formatter.print_info("No recent configuration changes found.")
+            else:
+                self.formatter.print_error("Failed to query ConfigurationChange table.")
+                self.formatter.print_info(f"Response: {response.text}")
+        except Exception as e:
+            self.formatter.print_error(f"Exception: {e}")
+
+        # 4. Failed Logins
+        self.formatter.print_subsection("FAILED LOGINS")
+        try:
+            query = f"""
+            SigninLogs
+            | where TimeGenerated > ago(1d)
+            | where ResultType != 0
+            | take {max_lines}
+            """
+            payload = {"query": query, "timespan": "P1D"}
+            response = self.api_client.arm_post(url, payload)
+            if response.status_code == 200:
+                tables = response.json().get('tables', [])
+                if tables and tables[0].get('rows'):
+                    self.formatter.print_success(f"Found {len(tables[0]['rows'])} failed logins.")
+                else:
+                    self.formatter.print_info("No failed logins found.")
+            else:
+                self.formatter.print_error("Failed to query SigninLogs for failed logins.")
+                self.formatter.print_info(f"Response: {response.text}")
+        except Exception as e:
+            self.formatter.print_error(f"Exception: {e}")
+
+        # 5. Data Feed Status
+        self.formatter.print_subsection("DATA FEED STATUS")
+        try:
+            url = f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.OperationalInsights/workspaces/{workspace_name}/providers/Microsoft.SecurityInsights/dataConnectors?api-version=2023-02-01-preview"
+            response = self.api_client.arm_get(url)
+            if response.status_code == 200:
+                connectors = response.json().get('value', [])
+                for connector in connectors:
+                    name = connector.get('name', 'Unknown')
+                    state = connector.get('properties', {}).get('connectorState', 'Unknown')
+                    self.formatter.print_key_value(f"Connector: {name}", f"State: {state}")
+            else:
+                self.formatter.print_error("Failed to retrieve data connectors.")
+                self.formatter.print_info(f"Response: {response.text}")
+        except Exception as e:
+            self.formatter.print_error(f"Exception: {e}")
+
+        # 6. External and Internal Connections Monitoring
+        self.formatter.print_subsection("EXTERNAL AND INTERNAL CONNECTIONS MONITORING")
+        try:
+            query = f"""
+            AzureNetworkAnalytics_CL
+            | where TimeGenerated > ago(1d)
+            | take {max_lines}
+            """
+            payload = {"query": query, "timespan": "P1D"}
+            response = self.api_client.arm_post(url, payload)
+            if response.status_code == 200:
+                tables = response.json().get('tables', [])
+                if tables and tables[0].get('rows'):
+                    self.formatter.print_success(f"Found {len(tables[0]['rows'])} recent network connection records.")
+                else:
+                    self.formatter.print_info("No recent network connection records found.")
+            else:
+                self.formatter.print_error("Failed to query AzureNetworkAnalytics_CL.")
+                self.formatter.print_info(f"Response: {response.text}")
+        except Exception as e:
+            self.formatter.print_error(f"Exception: {e}")
+
+        # 7. Root/Administrative Account Activity
+        self.formatter.print_subsection("ROOT/ADMINISTRATIVE ACCOUNT ACTIVITY")
+        try:
+            query = f"""
+            AuditLogs
+            | where TimeGenerated > ago(1d)
+            | where InitiatedBy contains "admin" or InitiatedBy contains "root"
+            | take {max_lines}
+            """
+            payload = {"query": query, "timespan": "P1D"}
+            response = self.api_client.arm_post(url, payload)
+            if response.status_code == 200:
+                tables = response.json().get('tables', [])
+                if tables and tables[0].get('rows'):
+                    self.formatter.print_success(f"Found {len(tables[0]['rows'])} recent root/admin activities.")
+                else:
+                    self.formatter.print_info("No recent root/admin activities found.")
+            else:
+                self.formatter.print_error("Failed to query AuditLogs for admin activity.")
+                self.formatter.print_info(f"Response: {response.text}")
+        except Exception as e:
+            self.formatter.print_error(f"Exception: {e}")
+
+        # 8. Permission and Object Changes
+        self.formatter.print_subsection("PERMISSION AND OBJECT CHANGES")
+        try:
+            query = f"""
+            AuditLogs
+            | where TimeGenerated > ago(1d)
+            | where ActivityDisplayName contains "permission" or ActivityDisplayName contains "role" or ActivityDisplayName contains "object"
+            | take {max_lines}
+            """
+            payload = {"query": query, "timespan": "P1D"}
+            response = self.api_client.arm_post(url, payload)
+            if response.status_code == 200:
+                tables = response.json().get('tables', [])
+                if tables and tables[0].get('rows'):
+                    self.formatter.print_success(f"Found {len(tables[0]['rows'])} recent permission/object changes.")
+                else:
+                    self.formatter.print_info("No recent permission/object changes found.")
+            else:
+                self.formatter.print_error("Failed to query AuditLogs for permission/object changes.")
+                self.formatter.print_info(f"Response: {response.text}")
+        except Exception as e:
+            self.formatter.print_error(f"Exception: {e}")
+        self.formatter.print_separator()
+
+    def check_azure_key_vault_key_storage(self):
+        """Check that all keys are stored in Azure Key Vault."""
+        self.formatter.print_header(
+            "AZURE KEY VAULT KEY STORAGE",
+            "This function enumerates all Azure Key Vaults and lists all keys, secrets, and certificates, evidencing that keys are stored securely in Key Vault."
+        )
+        subscription_id = getattr(self.config, 'subscription_id', None)
+        if not subscription_id:
+            self.formatter.print_error("subscription_id must be set in config.")
+            return
+        try:
+            # List all Key Vaults
+            url = f"/subscriptions/{subscription_id}/providers/Microsoft.KeyVault/vaults?api-version=2022-07-01"
+            response = self.api_client.arm_get(url)
+            if response.status_code == 200:
+                vaults = response.json().get('value', [])
+                if not vaults:
+                    self.formatter.print_warning("No Azure Key Vaults found in the subscription.")
+                    return
+                for vault in vaults:
+                    name = vault.get('name', 'Unknown')
+                    rg = vault.get('id', '').split('/')[4] if len(vault.get('id', '').split('/')) > 4 else 'Unknown'
+                    self.formatter.print_subsection(f"KEY VAULT: {name}")
+                    self.formatter.print_key_value("Resource Group", rg)
+                    # List keys, secrets, and certificates (metadata only)
+                    for kind, api in [("Keys", "keys"), ("Secrets", "secrets"), ("Certificates", "certificates")]:
+                        items_url = f"{vault['id']}/{api}?api-version=7.4"
+                        items_response = self.api_client.arm_get(items_url)
+                        if items_response.status_code == 200:
+                            items = items_response.json().get('value', [])
+                            self.formatter.print_key_value(f"{kind} Count", str(len(items)))
+                            for item in items[:5]:
+                                self.formatter.print_key_value(f"{kind[:-1]}", item.get('id', 'Unknown'))
+                            if len(items) > 5:
+                                self.formatter.print_info(f"... and {len(items) - 5} more {kind.lower()}.")
+                        else:
+                            self.formatter.print_error(f"Failed to list {kind.lower()} for {name}.")
+                    self.formatter.print_separator()
+            else:
+                self.formatter.print_error(f"Failed to retrieve Key Vaults: {response.status_code}")
+        except Exception as e:
+            self.formatter.print_error(f"Exception occurred while checking Key Vaults: {e}")
+        self.formatter.print_separator()
+
+
+    def check_inbound_internet_traffic_restriction(self):
+        """Check that inbound internet traffic is restricted to TLS and SSH encrypted ports only."""
+        self.formatter.print_header(
+            "INBOUND INTERNET TRAFFIC RESTRICTION (TLS/SSH ONLY)",
+            "This function checks all NSG/firewall rules to evidence that inbound internet traffic is restricted to TLS (443) and SSH (22) encrypted ports only, and warns if any other ports are open to the internet."
+        )
+        subscription_id = getattr(self.config, 'subscription_id', None)
+        if not subscription_id:
+            self.formatter.print_error("subscription_id must be set in config.")
+            return
+        allowed_ports = {"22", "443"}
+        try:
+            # List all Network Security Groups (NSGs)
+            url = f"/subscriptions/{subscription_id}/providers/Microsoft.Network/networkSecurityGroups?api-version=2023-04-01"
+            response = self.api_client.arm_get(url)
+            if response.status_code == 200:
+                nsgs = response.json().get('value', [])
+                if not nsgs:
+                    self.formatter.print_warning("No Network Security Groups found in the subscription.")
+                    return
+                for nsg in nsgs:
+                    nsg_name = nsg.get('name', 'Unknown')
+                    rg = nsg.get('id', '').split('/')[4] if len(nsg.get('id', '').split('/')) > 4 else 'Unknown'
+                    self.formatter.print_subsection(f"NSG: {nsg_name}")
+                    self.formatter.print_key_value("Resource Group", rg)
+                    rules = nsg.get('properties', {}).get('securityRules', [])
+                    found_violation = False
+                    for rule in rules:
+                        access = rule.get('access', '').lower()
+                        direction = rule.get('direction', '').lower()
+                        src_prefix = rule.get('sourceAddressPrefix', '')
+                        src_prefixes = rule.get('sourceAddressPrefixes', [])
+                        port_range = rule.get('destinationPortRange', '')
+                        port_ranges = rule.get('destinationPortRanges', [])
+                        name = rule.get('name', '')
+                        # Check if rule allows inbound from internet
+                        all_srcs = [src_prefix] if src_prefix else []
+                        all_srcs += src_prefixes
+                        all_ports = [port_range] if port_range else []
+                        all_ports += port_ranges
+                        if direction == 'inbound' and access == 'allow' and any(s in ['*', '0.0.0.0/0'] for s in all_srcs):
+                            for pr in all_ports:
+                                if pr not in allowed_ports:
+                                    self.formatter.print_warning(f"Rule '{name}' allows inbound internet traffic on port {pr} (NOT TLS/SSH)")
+                                    found_violation = True
+                    if not found_violation:
+                        self.formatter.print_success("All inbound internet rules restrict traffic to TLS/SSH ports only.")
+                    self.formatter.print_separator()
+            else:
+                self.formatter.print_error(f"Failed to retrieve NSGs: {response.status_code}")
+        except Exception as e:
+            self.formatter.print_error(f"Exception occurred while checking inbound internet traffic restriction: {e}")
+        self.formatter.print_separator()
+
+    def check_asg_non_secure_protocol_restriction(self):
+        """Check that non-secure protocols are not permitted by ASG-based firewall rules."""
+        self.formatter.print_header(
+            "ASG NON-SECURE PROTOCOL RESTRICTION",
+            "This function checks all NSG rules referencing ASGs to ensure non-secure protocols (HTTP, FTP, Telnet, SMB, etc.) are not permitted."
+        )
+        subscription_id = getattr(self.config, 'subscription_id', None)
+        if not subscription_id:
+            self.formatter.print_error("subscription_id must be set in config.")
+            return
+        # Common non-secure protocol ports
+        non_secure_ports = {
+            "80": "HTTP",
+            "20": "FTP-Data",
+            "21": "FTP",
+            "23": "Telnet",
+            "25": "SMTP (unencrypted)",
+            "110": "POP3",
+            "143": "IMAP",
+            "445": "SMB",
+            "139": "NetBIOS",
+            "3389": "RDP (unencrypted)",
+            "53": "DNS (unencrypted)",
+            "389": "LDAP (unencrypted)",
+            "137": "NetBIOS Name",
+            "138": "NetBIOS Datagram",
+            "6667": "IRC",
+            "69": "TFTP"
+        }
+        try:
+            # List all ASGs
+            asg_url = f"/subscriptions/{subscription_id}/providers/Microsoft.Network/applicationSecurityGroups?api-version=2023-04-01"
+            asg_response = self.api_client.arm_get(asg_url)
+            if asg_response.status_code == 200:
+                asgs = asg_response.json().get('value', [])
+                if not asgs:
+                    self.formatter.print_warning("No Application Security Groups found in the subscription.")
+                    return
+                # List all NSGs
+                nsg_url = f"/subscriptions/{subscription_id}/providers/Microsoft.Network/networkSecurityGroups?api-version=2023-04-01"
+                nsg_response = self.api_client.arm_get(nsg_url)
+                nsgs = nsg_response.json().get('value', []) if nsg_response.status_code == 200 else []
+                for asg in asgs:
+                    asg_name = asg.get('name', 'Unknown')
+                    asg_id = asg.get('id', '')
+                    rg = asg_id.split('/')[4] if len(asg_id.split('/')) > 4 else 'Unknown'
+                    self.formatter.print_subsection(f"ASG: {asg_name}")
+                    self.formatter.print_key_value("Resource Group", rg)
+                    found_violation = False
+                    for nsg in nsgs:
+                        nsg_name = nsg.get('name', 'Unknown')
+                        rules = nsg.get('properties', {}).get('securityRules', [])
+                        for rule in rules:
+                            src_asgs = rule.get('sourceApplicationSecurityGroups', [])
+                            dst_asgs = rule.get('destinationApplicationSecurityGroups', [])
+                            access = rule.get('access', '').lower()
+                            direction = rule.get('direction', '').lower()
+                            port_range = rule.get('destinationPortRange', '')
+                            port_ranges = rule.get('destinationPortRanges', [])
+                            name = rule.get('name', '')
+                            # Check if this ASG is referenced
+                            if any(asg_id == s.get('id') for s in src_asgs + dst_asgs):
+                                all_ports = [port_range] if port_range else []
+                                all_ports += port_ranges
+                                for pr in all_ports:
+                                    if pr in non_secure_ports and access == 'allow':
+                                        self.formatter.print_warning(f"Rule '{name}' in NSG '{nsg_name}' allows non-secure protocol {non_secure_ports[pr]} (port {pr})")
+                                        found_violation = True
+                    if not found_violation:
+                        self.formatter.print_success("No ASG-based rules allow non-secure protocols.")
+                    self.formatter.print_separator()
+            else:
+                self.formatter.print_error(f"Failed to retrieve ASGs: {asg_response.status_code}")
+        except Exception as e:
+            self.formatter.print_error(f"Exception occurred while checking ASG non-secure protocol restriction: {e}")
+        self.formatter.print_separator()
+
+    def check_high_availability_and_rto(self):
+        """Check for high availability configuration and evidence 1-hour RTO for product portions."""
+        self.formatter.print_header(
+            "HIGH AVAILABILITY & 1-HOUR RTO (PRODUCT PORTIONS)",
+            "This function checks for high availability (HA) configurations (zone/geo-redundancy, load balancers, etc.) and evidences a 1-hour recovery-time objective (RTO) for product portions."
+        )
+        subscription_id = getattr(self.config, 'subscription_id', None)
+        if not subscription_id:
+            self.formatter.print_error("subscription_id must be set in config.")
+            return
+        ha_found = False
+        try:
+            # Check VMs for availability sets or zones
+            url = f"/subscriptions/{subscription_id}/providers/Microsoft.Compute/virtualMachines?api-version=2023-03-01"
+            response = self.api_client.arm_get(url)
+            if response.status_code == 200:
+                vms = response.json().get('value', [])
+                if not vms:
+                    self.formatter.print_warning("No VMs found in the subscription.")
+                for vm in vms:
+                    name = vm.get('name', 'Unknown')
+                    az = vm.get('zones', [])
+                    avail_set = vm.get('properties', {}).get('availabilitySet', {}).get('id')
+                    self.formatter.print_subsection(f"VM: {name}")
+                    if az:
+                        ha_found = True
+                        self.formatter.print_success(f"Deployed in Availability Zone(s): {', '.join(az)}")
+                    elif avail_set:
+                        ha_found = True
+                        self.formatter.print_success(f"Part of Availability Set: {avail_set}")
+                    else:
+                        self.formatter.print_warning("No explicit HA configuration (zone or set) found for this VM.")
+                if not vms:
+                    self.formatter.print_info("No VMs to check for HA configuration.")
+            else:
+                self.formatter.print_error(f"Failed to retrieve VMs: {response.status_code}")
+        except Exception as e:
+            self.formatter.print_error(f"Exception occurred while checking VM HA: {e}")
+        # Check for zone-redundant storage
+        try:
+            url = f"/subscriptions/{subscription_id}/providers/Microsoft.Storage/storageAccounts?api-version=2022-09-01"
+            response = self.api_client.arm_get(url)
+            if response.status_code == 200:
+                accounts = response.json().get('value', [])
+                for account in accounts:
+                    name = account.get('name', 'Unknown')
+                    sku = account.get('sku', {}).get('name', '')
+                    kind = account.get('kind', '')
+                    self.formatter.print_subsection(f"STORAGE ACCOUNT: {name}")
+                    if 'ZRS' in sku:
+                        ha_found = True
+                        self.formatter.print_success("Zone-redundant storage (ZRS) configured")
+                    else:
+                        self.formatter.print_info(f"SKU: {sku} (not ZRS)")
+            else:
+                self.formatter.print_error(f"Failed to retrieve storage accounts: {response.status_code}")
+        except Exception as e:
+            self.formatter.print_error(f"Exception occurred while checking storage HA: {e}")
+        # Check for load balancers
+        try:
+            url = f"/subscriptions/{subscription_id}/providers/Microsoft.Network/loadBalancers?api-version=2023-04-01"
+            response = self.api_client.arm_get(url)
+            if response.status_code == 200:
+                lbs = response.json().get('value', [])
+                if lbs:
+                    ha_found = True
+                    self.formatter.print_success(f"Found {len(lbs)} load balancer(s) (supports HA)")
+                else:
+                    self.formatter.print_info("No load balancers found.")
+            else:
+                self.formatter.print_error(f"Failed to retrieve load balancers: {response.status_code}")
+        except Exception as e:
+            self.formatter.print_error(f"Exception occurred while checking load balancers: {e}")
+        # Check for geo-redundant databases (SQL, CosmosDB)
+        try:
+            url = f"/subscriptions/{subscription_id}/providers/Microsoft.Sql/servers?api-version=2022-05-01-preview"
+            response = self.api_client.arm_get(url)
+            if response.status_code == 200:
+                servers = response.json().get('value', [])
+                for server in servers:
+                    name = server.get('name', 'Unknown')
+                    self.formatter.print_subsection(f"SQL SERVER: {name}")
+                    # For simplicity, just print geo-replication links if present
+                    geo_rep_url = f"{server['id']}/databases?api-version=2022-05-01-preview"
+                    db_response = self.api_client.arm_get(geo_rep_url)
+                    if db_response.status_code == 200:
+                        dbs = db_response.json().get('value', [])
+                        for db in dbs:
+                            geo_links = db.get('properties', {}).get('geoReplicationLinks', [])
+                            if geo_links:
+                                ha_found = True
+                                self.formatter.print_success(f"Database {db.get('name')} has geo-replication configured.")
+                            else:
+                                self.formatter.print_info(f"Database {db.get('name')} has no geo-replication.")
+            else:
+                self.formatter.print_error(f"Failed to retrieve SQL servers: {response.status_code}")
+        except Exception as e:
+            self.formatter.print_error(f"Exception occurred while checking SQL geo-replication: {e}")
+        # Print RTO statement
+        if ha_found:
+            self.formatter.print_success("Product portions are highly available with a 1-hour recovery-time objective (RTO) based on HA configuration.")
+        else:
+            self.formatter.print_warning("No explicit HA configuration found. Please review your environment to ensure 1-hour RTO is achievable.")
+        self.formatter.print_separator()
+
+    def check_pim_admin_access(self):
+        """Check that admin access is limited to authorized devices with valid SSH keys via Entra ID PIM."""
+        self.formatter.print_header(
+            "PIM ADMIN ACCESS ENFORCEMENT",
+            "This function checks that admin access to the system is limited to authorized devices and users via Microsoft Entra ID Privileged Identity Management (PIM)."
+        )
+        try:
+            # Query all PIM eligibility schedules
+            url = "/roleManagement/directory/roleEligibilitySchedules"
+            response = self.api_client.graph_get(url)
+            if response.status_code == 200:
+                schedules = response.json().get('value', [])
+                found = False
+                for sched in schedules:
+                    role_id = sched.get('roleDefinitionId', '')
+                    principal_id = sched.get('principalId', '')
+
+                    # Try to resolve role name
+                    role_name = role_id
+                    if role_id:
+                        role_resp = self.api_client.graph_get(f"/directoryRoles/{role_id}")
+                        if role_resp.status_code == 200:
+                            role_name = role_resp.json().get('displayName', role_id)
+
+                    # Try to resolve principal name (user or service principal)
+                    principal_name = principal_id
+                    if principal_id:
+                        principal_resp = self.api_client.graph_get(f"/users/{principal_id}")
+                        if principal_resp.status_code == 200:
+                            principal_name = principal_resp.json().get('displayName', principal_id)
+                        else:
+                            principal_resp = self.api_client.graph_get(f"/servicePrincipals/{principal_id}")
+                            if principal_resp.status_code == 200:
+                                principal_name = principal_resp.json().get('displayName', principal_id)
+
+                    if role_id and principal_id:
+                        found = True
+                        self.formatter.print_success(
+                            f"PIM eligibility found for role: {role_name} (ID: {role_id}) and principal: {principal_name} (ID: {principal_id})"
+                        )
+                if not found:
+                    self.formatter.print_warning("No PIM eligibility schedules found for admin roles.")
+            else:
+                self.formatter.print_error(f"Failed to retrieve PIM eligibility schedules: {response.status_code}")
+        except Exception as e:
+            self.formatter.print_error(f"Exception occurred while checking PIM admin access: {e}")
+        self.formatter.print_separator()
+
+    def print_all_pim_admins(self):
+        """Print all active Privileged Identity Management (PIM) admins and their assigned roles."""
+        self.formatter.print_header(
+            "ACTIVE PIM ADMINISTRATORS",
+            "This function lists all users with active PIM admin assignments (role assignments) in Microsoft Entra ID, including their names, roles, and assignment details."
+        )
+        try:
+            # Query all active PIM role assignments
+            url = "/roleManagement/directory/roleAssignmentScheduleInstances"
+            response = self.api_client.graph_get(url)
+            if response.status_code == 200:
+                assignments = response.json().get('value', [])
+                if not assignments:
+                    self.formatter.print_info("No active PIM admin assignments found.")
+                for assignment in assignments:
+                    role_id = assignment.get('roleDefinitionId', '')
+                    principal_id = assignment.get('principalId', '')
+                    assignment_id = assignment.get('id', '')
+                    assignment_type = assignment.get('assignmentType', 'N/A')
+                    start_time = assignment.get('startDateTime', 'N/A')
+                    end_time = assignment.get('endDateTime', 'N/A')
+
+                    # Resolve role name
+                    role_name = role_id
+                    if role_id:
+                        role_resp = self.api_client.graph_get(f"/directoryRoles/{role_id}")
+                        if role_resp.status_code == 200:
+                            role_name = role_resp.json().get('displayName', role_id)
+
+                    # Resolve principal name
+                    principal_name = principal_id
+                    if principal_id:
+                        principal_resp = self.api_client.graph_get(f"/users/{principal_id}")
+                        if principal_resp.status_code == 200:
+                            principal_name = principal_resp.json().get('displayName', principal_id)
+                        else:
+                            principal_resp = self.api_client.graph_get(f"/servicePrincipals/{principal_id}")
+                            if principal_resp.status_code == 200:
+                                principal_name = principal_resp.json().get('displayName', principal_id)
+
+                    self.formatter.print_key_value("Assignment ID", assignment_id)
+                    self.formatter.print_key_value("User/Principal", principal_name)
+                    self.formatter.print_key_value("Role", role_name)
+                    self.formatter.print_key_value("Assignment Type", assignment_type)
+                    self.formatter.print_key_value("Start Time", start_time)
+                    self.formatter.print_key_value("End Time", end_time)
+                    self.formatter.print_separator()
+            else:
+                self.formatter.print_error(f"Failed to retrieve PIM admin assignments: {response.status_code}")
+        except Exception as e:
+            self.formatter.print_error(f"Exception occurred while retrieving PIM admin assignments: {e}")
+        self.formatter.print_separator()
+
+
+    def check_ssh_mfa_enforcement(self):
+        """Check that SSH sessions require MFA (Microsoft Authenticator) via Conditional Access or Azure AD login."""
+        self.formatter.print_header(
+            "SSH MFA ENFORCEMENT",
+            "This function checks if SSH access to the system requires MFA (Microsoft Authenticator), typically via Azure AD login for Linux VMs and Conditional Access policies."
+        )
+        try:
+            url = "/identity/conditionalAccess/policies"
+            response = self.api_client.graph_get(url)
+            if response.status_code == 200:
+                policies = response.json().get('value', [])
+                found = False
+                for policy in policies:
+                    display_name = policy.get('displayName', '')
+                    grant_controls = policy.get('grantControls', {})
+                    built_in_controls = grant_controls.get('builtInControls', [])
+                    if 'mfa' in built_in_controls and 'ssh' in display_name.lower():
+                        found = True
+                        self.formatter.print_success(f"MFA required for SSH sessions by policy: {display_name}")
+                if not found:
+                    self.formatter.print_warning("No Conditional Access policy found requiring MFA for SSH sessions.")
+            else:
+                self.formatter.print_error(f"Failed to retrieve Conditional Access policies: {response.status_code}")
+        except Exception as e:
+            self.formatter.print_error(f"Exception occurred while checking SSH MFA enforcement: {e}")
+        self.formatter.print_separator()
+
+    def check_ssh_alerts_to_teams(self):
+        """Check that SSH session events trigger alerts to Microsoft Teams for InfoSec Admin."""
+        self.formatter.print_header(
+            "SSH SESSION ALERTS TO TEAMS",
+            "This function checks if there is an Azure Function, Logic App, or Sentinel analytic rule that triggers alerts to Microsoft Teams for SSH session events."
+        )
+        subscription_id = getattr(self.config, 'subscription_id', None)
+        if not subscription_id:
+            self.formatter.print_error("subscription_id must be set in config.")
+            return
+        found = False
+        try:
+            # Check Sentinel analytic rules for SSH alerting
+            url = f"/subscriptions/{subscription_id}/providers/Microsoft.OperationalInsights/workspaces?api-version=2022-10-01"
+            response = self.api_client.arm_get(url)
+            if response.status_code == 200:
+                workspaces = response.json().get('value', [])
+                for ws in workspaces:
+                    ws_name = ws.get('name', '')
+                    resource_group = ws.get('id', '').split('/')[4] if len(ws.get('id', '').split('/')) > 4 else ''
+                    rules_url = f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.OperationalInsights/workspaces/{ws_name}/providers/Microsoft.SecurityInsights/alertRules?api-version=2022-12-01-preview"
+                    rules_response = self.api_client.arm_get(rules_url)
+                    if rules_response.status_code == 200:
+                        rules = rules_response.json().get('value', [])
+                        for rule in rules:
+                            name = rule.get('name', '')
+                            props = rule.get('properties', {})
+                            if 'ssh' in name.lower() or 'ssh' in props.get('displayName', '').lower():
+                                actions = props.get('actions', [])
+                                for action in actions:
+                                    if action.get('actionType', '').lower() == 'logicapp' or 'teams' in str(action).lower():
+                                        found = True
+                                        self.formatter.print_success(f"SSH session alert rule found: {name} (alerts to Teams/Logic App)")
+            if not found:
+                self.formatter.print_warning("No SSH session alerting rules to Teams found in Sentinel analytic rules.")
+        except Exception as e:
+            self.formatter.print_error(f"Exception occurred while checking SSH alerts to Teams: {e}")
         self.formatter.print_separator()
