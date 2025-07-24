@@ -4,15 +4,7 @@
 
 This script serves as evidence that security requirements have been fulfilled by printing the current configurations of relevant Microsoft Entra ID (Azure AD) security policies and Azure resource configurations. It is designed to support FedRAMP Moderate compliance assessments by providing automated evidence gathering for various security controls.
 
-The script retrieves configuration data from Microsoft Graph API and Azure Resource Manager (ARM) API to validate that security policies are properly configured and enforced across your Azure environment. Version 3 introduces enhanced audit record capabilities and comprehensive non-repudiation evidence collection.
-
-## Key Features in v3
-
-- **Enhanced Audit Record Collection**: Comprehensive audit records with all required non-repudiation attributes
-- **Microsoft Sentinel Integration**: Advanced monitoring of administrative actions, query auditing, and command execution
-- **Token Management**: Automated token refresh and management system
-- **Modular Architecture**: Separated concerns with dedicated modules for different functionality
-- **Comprehensive Output**: Detailed evidence collection with formatted output for compliance reporting
+The script retrieves configuration data from Microsoft Graph API and Azure Resource Manager (ARM) API to validate that security policies are properly configured and enforced across your Azure environment.
 
 ## How to Use
 
@@ -30,17 +22,31 @@ Create or update the `config.json` file with your Azure environment details:
 ```json
 {
   "subscription_id": "your-subscription-id",
-  "resource_group": "your-resource-group",
+  "resource_group": "your-resource-group", 
   "workspace_name": "your-log-analytics-workspace",
   "graph_base_url": "https://graph.microsoft.com/v1.0",
   "arm_base_url": "https://management.azure.com",
-  "max_lines": 100,
+  "max_items": 10,
+  "max_subitems": 10,
   "output_file": "out.txt",
   "tenant_id": "your-tenant-id",
   "client_id": "your-client-id",
   "client_secret": "your-client-secret"
 }
 ```
+
+**Required Configuration Fields:**
+- `subscription_id`: Azure subscription ID
+- `resource_group`: Resource group containing Log Analytics workspace
+- `workspace_name`: Log Analytics workspace name
+- `tenant_id`: Azure AD tenant ID
+- `client_id`: Azure AD app registration client ID
+- `client_secret`: Azure AD app registration client secret
+
+**Optional Configuration Fields:**
+- `max_items`: Maximum number of items to display (default: 10)
+- `max_subitems`: Maximum number of sub-items to display (default: 10)
+- `output_file`: Output file name (default: "out.txt")
 
 #### 2. Install Dependencies
 
@@ -73,45 +79,60 @@ The script will automatically:
 ### Customization
 - Modify `config.json` to adjust workspace settings and output preferences
 - Comment/uncomment specific function calls in `main.py` to run only desired assessments
-- Adjust the `max_lines` parameter in config to control output verbosity
+- Adjust the `max_items` and `max_subitems` parameters in config to control output verbosity
 
 ## 1. The script currently reads and logs the configurations of the following controls and policies:
 
 ### Authentication and Access Controls
-- Smart Lockout Defaults
-- Custom Smart Lockout (Password Protection)
-- Conditional Access Policies (Device Compliance, MFA)
+- Smart Lockout Defaults and Custom Settings
+- Password Protection Policy
+- Conditional Access Policies (Device Compliance, MFA, Mobile Device Blocking)
 - Intune Machine Inactivity Limit (Auto-Lock)
-- Available Permissions
+- Available Permissions Check
 - Intune Compliance Policies (BitLocker, Defender, Secure Boot, Password)
+- Users Must Change Password Policy
 
 ### Sentinel and Monitoring
 - Sentinel Error Analytic Rules
 - Sentinel Defender Connector Status
 - Sentinel Defender Endpoint Connector Status
+- Sentinel Connected Workspaces
 - Sentinel Incident Summary
 - Sentinel Log Deletion Alert Rules
-- Recent Sentinel Error Logs
-- **Microsoft Sentinel Privileged Command Auditing** (NEW in v3)
-- **Microsoft Sentinel Comprehensive Audit Records** (NEW in v3)
+- Recent Sentinel Error Logs (24 hours)
+- Microsoft Sentinel Privileged Command Auditing
+- Microsoft Sentinel Comprehensive Audit Records
+- Sentinel System Performance Monitoring
+- Sentinel Alerts and Health Reports
+- Recent Sentinel Security Alerts (24 hours)
+- Recent Security Incidents
 
 ### Defender and Security
 - Defender for Cloud Failed Checks
 - Defender FIM Configuration
 - Defender App Control Status
 - Defender Endpoint Malware Protection
+- Defender Cloud Security Posture Management
 
 ### Network Security
 - WAF Deployment and Policy Status
 - DNSSEC Status
-- NSG SMTP Block Status
-- Firewall SMTP Block Status
+- NSG SMTP Block Status (Ports 25, 465)
+- Firewall SMTP Block Status (Ports 25, 465)
 - Bastion SSH Timeout Status
+- P2P File Sharing Restriction
+- ASG Boundary Protection
+- Inbound Internet Traffic Restriction
+- ASG Non-Secure Protocol Restriction
+- Bastion Host Settings
+- NSG Allowed/Disallowed Ports
 
 ### Infrastructure and Compliance
 - Admin Group Membership
-- Blob Storage ZRS Status
+- Blob Storage Audit Retention
+- FIPS Validated Encryption
 - Recovery Services Backup Policies
+- Comprehensive Database Backup Status
 - Missing Asset Tag Resources
 - Log Analytics Immutability
 - PIM Role Assignment Policies
@@ -120,23 +141,21 @@ The script will automatically:
 - Master Inventory Reconciliation
 - Infrastructure Vulnerability Scans
 - Insider Threat Escalation
+- Azure Functions Multi-AZ
+- Azure Time Sync Service
+- High Availability and RTO
+- Azure Posture Management Deployment Logs
+- Azure Functions Availability Zones
 
 ### Risk-Based Security
 - User Risk Policy
 - Identity Protection Risk Detections
 - Sign-in Risk Policy
+- High Risk Users with Activity
 
-### Infrastructure and Monitoring
-- Bastion Host Settings
-- Encryption Policy and Defender Status
-- Log Analytics Retention Settings
-- Workspace RBAC
-- Credential Distribution Audit Events
-- CIS L1 Initiative Assignment
-- WAF Diagnostic Settings
-- Recent FIM Alerts
-- ARM Template Configuration Orchestration
-- **Recent Sentinel Security Alerts** (ENHANCED in v3)
+### Privileged Access & Identity
+- PIM Admin Access
+- All PIM Admins
 
 ### Advanced Security Controls
 - Intrusion Detection Systems
@@ -144,23 +163,42 @@ The script will automatically:
 - Logical Access Revocation
 - Screen Lock Obfuscation Settings
 
+### Access & Session Controls
+- SSH MFA Enforcement
+- SSH Alerts to Teams
+- VM OS Auth on Unlock
+
+### Log Analytics and RBAC
+- Log Analytics Retention Settings
+- Workspace RBAC
+- Credential Distribution Audit Events
+- CIS L1 Initiative Assignment
+- WAF Diagnostic Settings
+- Recent FIM Alerts
+- ARM Template Configuration Orchestration
+- Log Analytics Purge Users
+- Resource Groups and System Load
+
 ## 2 (a). Required Microsoft Graph API Permissions
 
 For the script to function correctly, your Azure AD application must have the following 
 Microsoft Graph API permissions (Application permissions):
 
-- Policy.Read.All
-- Directory.Read.All
-- IdentityRiskyUser.Read.All
-- IdentityRiskEvent.Read.All
-- DeviceManagementConfiguration.Read.All
-- DeviceManagementManagedDevices.Read.All
-- RoleManagement.Read.Directory
-- User.Read.All
-- Group.Read.All
-- AuditLog.Read.All
-- SecurityEvents.Read.All
-- SecurityIncident.Read.All
+- `Policy.Read.All`
+- `Directory.Read.All`
+- `IdentityRiskyUser.Read.All`
+- `IdentityRiskEvent.Read.All`
+- `DeviceManagementConfiguration.Read.All`
+- `DeviceManagementManagedDevices.Read.All`
+- `RoleManagement.Read.Directory`
+- `User.Read.All`
+- `Group.Read.All`
+- `AuditLog.Read.All`
+- `SecurityEvents.Read.All`
+- `SecurityIncident.Read.All`
+- `AccessReview.Read.All`
+- `PrivilegedAccess.Read.AzureAD`
+- `LifecycleWorkflows.Read.All`
 
 All of the above must be added as **Application** permissions (not Delegated), and you must grant admin consent in the Azure portal after adding them.
 
@@ -177,53 +215,59 @@ This role grants read-only access to all resources, which is sufficient for all 
 The script uses the following API endpoints:
 
 ### Microsoft Graph API Endpoints:
-- /policies/identitySecurityDefaultsEnforcementPolicy
-- /directorySettings
-- /deviceManagement/deviceConfigurations
-- /deviceManagement/deviceCompliancePolicies
-- /identity/conditionalAccess/policies
-- /identityProtection/userRiskPolicy
-- /identityProtection/riskDetections
-- /roleManagement/directory/roleAssignmentSchedulePolicies
-- /domains
-- /directoryRoles
-- /deviceManagement/managedDevices
-- /policies/authenticationMethodsPolicy
-- /policies
-- /security/secureScoreControlProfiles
-- /security/alerts
-- /identityGovernance/lifecycleWorkflows/workflows
-- /identityGovernance/accessReviews/definitions
-- /auditLogs/directoryAudits (with various filters)
-- /groups
-- /identityGovernance/accessReviews/definitions/{reviewId}/instances
+- `/policies/identitySecurityDefaultsEnforcementPolicy`
+- `/policies/authenticationMethodsPolicy`
+- `/identity/conditionalAccess/policies`
+- `/deviceManagement/deviceConfigurations`
+- `/deviceManagement/deviceCompliancePolicies`
+- `/deviceManagement/managedDevices`
+- `/identityProtection/userRiskPolicy`
+- `/identityProtection/riskDetections`
+- `/roleManagement/directory/roleAssignmentSchedulePolicies`
+- `/domains`
+- `/domains/{domainId}/authenticationConfiguration`
+- `/groups`
+- `/users`
+- `/groups/{groupId}/members`
+- `/users/{userId}/memberOf`
+- `/identityGovernance/lifecycleWorkflows/workflows`
+- `/identityGovernance/accessReviews/definitions`
+- `/identityGovernance/accessReviews/definitions/{reviewId}/instances`
+- `/auditLogs/directoryAudits` (with various filters)
 
 ### Azure Resource Manager (ARM) API Endpoints:
-- /subscriptions/{subscriptionId}/resourceGroups/{resourceGroup}/providers/Microsoft.Network/bastionHosts
-- /subscriptions/{subscriptionId}/providers/Microsoft.Authorization/policyAssignments
-- /subscriptions/{subscriptionId}/providers/Microsoft.Security/pricings
-- /subscriptions/{subscriptionId}/resourceGroups/{resourceGroup}/providers/Microsoft.OperationalInsights/workspaces/{workspaceName}
-- /subscriptions/{subscriptionId}/resourceGroups/{resourceGroup}/providers/Microsoft.OperationalInsights/workspaces/{workspaceName}/providers/Microsoft.Authorization/roleAssignments
-- /subscriptions/{subscriptionId}/resourceGroups/{resourceGroup}/providers/Microsoft.OperationalInsights/workspaces/{workspaceName}/providers/Microsoft.SecurityInsights/alertRules
-- /subscriptions/{subscriptionId}/resourceGroups/{resourceGroup}/providers/Microsoft.OperationalInsights/workspaces/{workspaceName}/providers/Microsoft.SecurityInsights/incidents
-- /subscriptions/{subscriptionId}/resourceGroups/{resourceGroup}/providers/Microsoft.OperationalInsights/workspaces/{workspaceName}/providers/Microsoft.SecurityInsights/dataConnectors
-- /subscriptions/{subscriptionId}/providers/Microsoft.Network/networkSecurityGroups
-- /subscriptions/{subscriptionId}/providers/Microsoft.Network/azureFirewalls
-- /subscriptions/{subscriptionId}/providers/Microsoft.CertificateManager/certificateManagers
-- /subscriptions/{subscriptionId}/providers/Microsoft.CertificateManager/certificates
-- /subscriptions/{subscriptionId}/providers/Microsoft.KeyVault/vaults
-- /subscriptions/{subscriptionId}/providers/Microsoft.Network/dnsZones
-- /subscriptions/{subscriptionId}/providers/Microsoft.Storage/storageAccounts
-- /subscriptions/{subscriptionId}/providers/Microsoft.RecoveryServices/vaults
-- /subscriptions/{subscriptionId}/resources
-- /subscriptions/{subscriptionId}/providers/Microsoft.Resources/deployments
-- /subscriptions/{subscriptionId}/providers/Microsoft.Security/assessments
-- /subscriptions/{subscriptionId}/providers/Microsoft.Security/alerts
-- /subscriptions/{subscriptionId}/providers/Microsoft.Web/certificates
-- /subscriptions/{subscriptionId}/resourceGroups/{resourceGroup}/providers/Microsoft.RecoveryServices/vaults/{vaultName}/backupPolicies
+- `/subscriptions/{subscriptionId}/providers/Microsoft.Network/networkSecurityGroups`
+- `/subscriptions/{subscriptionId}/providers/Microsoft.Network/azureFirewalls`
+- `/subscriptions/{subscriptionId}/providers/Microsoft.Network/applicationSecurityGroups`
+- `/subscriptions/{subscriptionId}/providers/Microsoft.Network/bastionHosts`
+- `/subscriptions/{subscriptionId}/providers/Microsoft.Network/dnsZones`
+- `/subscriptions/{subscriptionId}/providers/Microsoft.Network/applicationGateways`
+- `/subscriptions/{subscriptionId}/providers/Microsoft.Network/frontDoors`
+- `/subscriptions/{subscriptionId}/providers/Microsoft.Storage/storageAccounts`
+- `/subscriptions/{subscriptionId}/providers/Microsoft.Storage/storageAccounts/{accountName}/blobServices`
+- `/subscriptions/{subscriptionId}/providers/Microsoft.Storage/storageAccounts/{accountName}/blobServices/default/containers`
+- `/subscriptions/{subscriptionId}/providers/Microsoft.RecoveryServices/vaults`
+- `/subscriptions/{subscriptionId}/providers/Microsoft.RecoveryServices/vaults/{vaultName}/backupPolicies`
+- `/subscriptions/{subscriptionId}/providers/Microsoft.Sql/servers`
+- `/subscriptions/{subscriptionId}/providers/Microsoft.Sql/servers/{serverName}/databases`
+- `/subscriptions/{subscriptionId}/providers/Microsoft.KeyVault/vaults`
+- `/subscriptions/{subscriptionId}/providers/Microsoft.CertificateManager/certificates`
+- `/subscriptions/{subscriptionId}/providers/Microsoft.Security/pricings`
+- `/subscriptionId}/providers/Microsoft.Security/assessments`
+- `/subscriptions/{subscriptionId}/providers/Microsoft.Security/alerts`
+- `/subscriptions/{subscriptionId}/providers/Microsoft.Web/certificates`
+- `/subscriptions/{subscriptionId}/providers/Microsoft.Resources/deployments`
+- `/subscriptions/{subscriptionId}/resources`
+- `/subscriptions/{subscriptionId}/providers/Microsoft.Authorization/policyAssignments`
+- `/subscriptions/{subscriptionId}/resourceGroups/{resourceGroup}/providers/Microsoft.OperationalInsights/workspaces/{workspaceName}`
+- `/subscriptions/{subscriptionId}/resourceGroups/{resourceGroup}/providers/Microsoft.OperationalInsights/workspaces/{workspaceName}/providers/Microsoft.SecurityInsights/alertRules`
+- `/subscriptions/{subscriptionId}/resourceGroups/{resourceGroup}/providers/Microsoft.OperationalInsights/workspaces/{workspaceName}/providers/Microsoft.SecurityInsights/incidents`
+- `/subscriptions/{subscriptionId}/resourceGroups/{resourceGroup}/providers/Microsoft.OperationalInsights/workspaces/{workspaceName}/providers/Microsoft.SecurityInsights/dataConnectors`
+- `/subscriptions/{subscriptionId}/resourceGroups/{resourceGroup}/providers/Microsoft.OperationalInsights/workspaces/{workspaceName}/providers/Microsoft.Authorization/roleAssignments`
+- `/subscriptions/{subscriptionId}/resourceGroups/{resourceGroup}/providers/Microsoft.OperationalInsights/workspaces/{workspaceName}/api/query`
 
 ### Log Analytics Query API:
-- /subscriptions/{subscriptionId}/resourceGroups/{resourceGroup}/providers/Microsoft.OperationalInsights/workspaces/{workspaceName}/api/query
+- `/subscriptions/{subscriptionId}/resourceGroups/{resourceGroup}/providers/Microsoft.OperationalInsights/workspaces/{workspaceName}/api/query`
 
 ## 4. Project Structure
 
@@ -264,6 +308,12 @@ The new `check_sentinel_comprehensive_audit_records()` function provides compreh
 - Clear success/failure indicators
 - Detailed evidence collection for compliance reporting
 
+### Network Security Enhancements
+- ASG (Application Security Group) boundary protection checks
+- Non-secure protocol restriction validation
+- Inbound internet traffic restriction verification
+- Comprehensive NSG port analysis
+
 ## 6. Compliance Evidence
 
 This tool provides comprehensive evidence for FedRAMP Moderate compliance by:
@@ -273,6 +323,8 @@ This tool provides comprehensive evidence for FedRAMP Moderate compliance by:
 - **Monitoring**: Evidence of security monitoring and alerting capabilities
 - **Configuration Management**: Validation of security policy configurations
 - **Incident Response**: Documentation of security incident handling capabilities
+- **Network Security**: Evidence of boundary protection and traffic filtering
+- **Identity Management**: Verification of privileged access controls and lifecycle management
 
 ## 7. Troubleshooting
 
@@ -285,6 +337,8 @@ This tool provides comprehensive evidence for FedRAMP Moderate compliance by:
 3. **Missing Data**: Some functions may return no results if the corresponding services are not configured or if no relevant data exists in the specified time period.
 
 4. **API Rate Limits**: The script includes error handling for API rate limits and will retry requests as appropriate.
+
+5. **403 Errors**: If you encounter 403 errors for specific functions, ensure the required Microsoft Graph API permissions are granted and admin consent is provided.
 
 ### Debug Mode
 
@@ -302,7 +356,7 @@ When adding new security checks:
 
 ## 9. Version History
 
-- **v3.0**: Enhanced audit record collection, modular architecture, improved token management
+- **v3.0**: Enhanced audit record collection, modular architecture, improved token management, network security enhancements
 - **v2.0**: Additional security controls and improved error handling
 - **v1.0**: Initial release with basic security policy checks
 

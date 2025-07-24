@@ -175,18 +175,20 @@ class Config:
     """Configuration management for the Security Policy Printer"""
     
     def __init__(self, subscription_id: str, resource_group: str, workspace_name: str,
-                 graph_base_url: str, arm_base_url: str, max_lines: int, output_file: str,
-                 tenant_id: str | None = None, client_id: str | None = None, client_secret: str | None = None):
+                 graph_base_url: str, arm_base_url: str, max_items: int, output_file: str,
+                 tenant_id: str | None = None, client_id: str | None = None, client_secret: str | None = None,
+                 max_subitems: int = 10):
         self.subscription_id = subscription_id
         self.resource_group = resource_group
         self.workspace_name = workspace_name
         self.graph_base_url = graph_base_url
         self.arm_base_url = arm_base_url
-        self.max_lines = max_lines
+        self.max_items = max_items
         self.output_file = output_file
         self.tenant_id = tenant_id
         self.client_id = client_id
         self.client_secret = client_secret
+        self.max_subitems = max_subitems
     
     @classmethod
     def from_file(cls, config_file: str = "config.json") -> "Config":
@@ -199,6 +201,8 @@ class Config:
         
         with open(config_file, 'r') as f:
             data = json.load(f)
+            if 'max_subitems' not in data:
+                data['max_subitems'] = 10
             return cls(**data)
     
     def to_dict(self) -> dict:
@@ -209,11 +213,12 @@ class Config:
             "workspace_name": self.workspace_name,
             "graph_base_url": self.graph_base_url,
             "arm_base_url": self.arm_base_url,
-            "max_lines": self.max_lines,
+            "max_items": self.max_items,
             "output_file": self.output_file,
             "tenant_id": self.tenant_id,
             "client_id": self.client_id,
-            "client_secret": self.client_secret
+            "client_secret": self.client_secret,
+            "max_subitems": self.max_subitems
         }
     
     def save(self, config_file: str = "config.json"):
