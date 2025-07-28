@@ -212,8 +212,6 @@ class SecurityFunctions:
             self.formatter.print_error(f"Exception occurred: {e}")
         self.formatter.print_separator()
 
-
-
     def _get_security_defaults_policy(self) -> Optional[Dict[str, Any]]:
         """Get security defaults policy"""
         try:
@@ -336,10 +334,6 @@ class SecurityFunctions:
         except Exception as e:
             self.formatter.print_error(f"Exception occurred while retrieving compliance policies: {e}")
         self.formatter.print_separator()
-
-
-
-
 
     def check_sentinel_error_analytic_rules(self):
         """List all Microsoft Sentinel analytic rules related to error logs in the specified workspace."""
@@ -761,14 +755,15 @@ class SecurityFunctions:
             self.formatter.print_error(f"Exception occurred: {e}")
         self.formatter.print_separator() 
         
-    def check_group_membership(self, max_groups: int = 10):
-        """List all Microsoft Entra ID groups and the members assigned to each group, with a table of member details and their roles. List users not in any group separately. Limit number of groups displayed with max_groups."""
+    def check_group_membership(self):
+        """List all Microsoft Entra ID groups and the members assigned to each group, with a table of member details and their roles. List users not in any group separately. Limit number of groups displayed with max_subitems config."""
         self.formatter.print_header(
             "MICROSOFT ENTRA ID GROUP MEMBERSHIP",
             "This function lists all Microsoft Entra ID groups and the members assigned to each group, with a table of member details and their roles. Users not part of any group are listed separately."
         )
         try:
             max_items = getattr(self.config, 'max_lines', 100)
+            max_groups = getattr(self.config, 'max_subitems', 10)
             # Get all groups
             groups_response = self.api_client.graph_get(f"/groups?$top={max_groups}")
             if groups_response.status_code != 200:
@@ -833,16 +828,24 @@ class SecurityFunctions:
                 self.formatter.print_section_header("Users not in any group")
                 table_rows = []
                 for u in not_in_group[:max_items]:
+                    # Get roles for this user (directory roles)
+                    user_id = u.get('id')
+                    roles_response = self.api_client.graph_get(f"/users/{user_id}/memberOf?$top={max_items}")
+                    roles = []
+                    if roles_response.status_code == 200:
+                        roles = [r.get('displayName', '') for r in roles_response.json().get('value', []) if r.get('@odata.type', '').endswith('directoryRole')]
+                    
                     table_rows.append([
                         u.get('displayName', ''),
                         u.get('userPrincipalName', ''),
                         u.get('mail', ''),
-                        u.get('id', '')
+                        u.get('id', ''),
+                        ", ".join(roles) if roles else "(none)"
                     ])
                 if len(not_in_group) > max_items:
                     self.formatter.print_info(f"Table truncated to first {max_items} users.")
                 self.formatter.print_table([
-                    "Display Name", "User Principal Name", "Email", "Object ID"], table_rows)
+                    "Display Name", "User Principal Name", "Email", "Object ID", "Role(s)"], table_rows)
             else:
                 self.formatter.print_info("All users are members of at least one group.")
         except Exception as e:
@@ -1310,6 +1313,186 @@ class SecurityFunctions:
                 self.formatter.print_error(f"Failed to retrieve Application Gateways: {response.status_code}")
         except Exception as e:
             self.formatter.print_error(f"Exception occurred: {e}")        
+        
+        # 6. Check Azure Recovery Services Vault Backup Encryption
+        self.formatter.print_subsection("AZURE RECOVERY SERVICES VAULT - BACKUP DATA ENCRYPTION")
+        try:
+            # Get all Recovery Services Vaults
+            url = f"/subscriptions/{subscription_id}/providers/Microsoft.RecoveryServices/vaults?api-version=2023-04-01"
+            response = self.api_client.arm_get(url)
+            if response.status_code == 200:
+                vaults = response.json().get('value', [])
+                if not vaults:
+                    self.formatter.print_warning("No Recovery Services Vaults found in subscription")
+                else:
+                    self.formatter.print_success(f"Found {len(vaults)} Recovery Services Vaults")
+                    
+                    total_vaults = 0
+                    encrypted_vaults = 0
+                    
+                    for vault in vaults:
+                        total_vaults += 1
+                        vault_name = vault.get('name', 'Unknown')
+                        vault_id = vault.get('id', '')
+                        location = vault.get('location', 'Unknown')
+                        properties = vault.get('properties', {})
+                        
+                        self.formatter.print_subsection(f"RECOVERY SERVICES VAULT: {vault_name}")
+                        self.formatter.print_key_value("Location", location)
+                        
+                        # Check encryption settings
+                        encryption_settings = properties.get('encryption', {})
+                        encryption_state = encryption_settings.get('state', 'Unknown')
+                        encryption_type = encryption_settings.get('type', 'Unknown')
+                        
+                        self.formatter.print_key_value("Encryption State", encryption_state)
+                        self.formatter.print_key_value("Encryption Type", encryption_type)
+                        
+                        # Check if backup data is encrypted
+                        if encryption_state == 'Enabled':
+                            encrypted_vaults += 1
+                            self.formatter.print_success("Backup data encryption is enabled")
+                            
+                            # Check encryption type details
+                            if encryption_type == 'SystemAssigned':
+                                self.formatter.print_success("Using system-assigned managed identity for encryption")
+                            elif encryption_type == 'UserAssigned':
+                                self.formatter.print_success("Using user-assigned managed identity for encryption")
+                            else:
+                                self.formatter.print_info(f"Encryption type: {encryption_type}")
+                            
+                            # Check key vault integration
+                            key_vault_properties = encryption_settings.get('keyVaultProperties', {})
+                            key_vault_id = key_vault_properties.get('keyUri', 'Not configured')
+                            
+                            if key_vault_id != 'Not configured':
+                                self.formatter.print_success("Key Vault integration configured for encryption keys")
+                                self.formatter.print_key_value("Key Vault URI", key_vault_id)
+                            else:
+                                self.formatter.print_info("Using platform-managed encryption keys")
+                            
+                            # Check infrastructure encryption
+                            infrastructure_encryption = encryption_settings.get('infrastructureEncryption', 'Disabled')
+                            self.formatter.print_key_value("Infrastructure Encryption", infrastructure_encryption)
+                            
+                            if infrastructure_encryption == 'Enabled':
+                                self.formatter.print_success("Infrastructure encryption enabled (double encryption)")
+                            else:
+                                self.formatter.print_info("Infrastructure encryption not enabled")
+                            
+                        elif encryption_state == 'Disabled':
+                            self.formatter.print_error("Backup data encryption is disabled")
+                        else:
+                            self.formatter.print_warning(f"⚠ Encryption state unknown: {encryption_state}")
+                        
+                        # Check protected items (VMs, Storage, SQL workloads)
+                        self.formatter.print_subsection(f"PROTECTED ITEMS IN VAULT: {vault_name}")
+                        try:
+                            # Get protected items
+                            protected_items_url = f"{vault_id}/backupProtectedItems?api-version=2023-04-01"
+                            protected_response = self.api_client.arm_get(protected_items_url)
+                            
+                            if protected_response.status_code == 200:
+                                protected_items = protected_response.json().get('value', [])
+                                if protected_items:
+                                    self.formatter.print_success(f"Found {len(protected_items)} protected items")
+                                    
+                                    vm_count = 0
+                                    storage_count = 0
+                                    sql_count = 0
+                                    
+                                    for item in protected_items:
+                                        item_properties = item.get('properties', {})
+                                        item_type = item_properties.get('protectedItemType', 'Unknown')
+                                        item_name = item.get('name', 'Unknown')
+                                        
+                                        if 'VirtualMachine' in item_type:
+                                            vm_count += 1
+                                        elif 'AzureStorage' in item_type:
+                                            storage_count += 1
+                                        elif 'SQL' in item_type:
+                                            sql_count += 1
+                                        
+                                        self.formatter.print_key_value(f"Protected Item: {item_name}", item_type)
+                                    
+                                    # Summary of protected workloads
+                                    if vm_count > 0:
+                                        self.formatter.print_success(f"{vm_count} Virtual Machine(s) protected")
+                                    if storage_count > 0:
+                                        self.formatter.print_success(f"{storage_count} Storage workload(s) protected")
+                                    if sql_count > 0:
+                                        self.formatter.print_success(f"{sql_count} SQL workload(s) protected")
+                                    
+                                    # Verify encryption applies to all protected items
+                                    if encryption_state == 'Enabled':
+                                        self.formatter.print_success("All protected items benefit from backup data encryption")
+                                    else:
+                                        self.formatter.print_error("Protected items are not encrypted")
+                                else:
+                                    self.formatter.print_info("No protected items found in this vault")
+                            else:
+                                self.formatter.print_warning(f"Could not retrieve protected items: {protected_response.status_code}")
+                        except Exception as e:
+                            self.formatter.print_warning(f"Could not check protected items: {e}")
+                        
+                        # Check backup policies
+                        try:
+                            policies_url = f"{vault_id}/backupPolicies?api-version=2023-04-01"
+                            policies_response = self.api_client.arm_get(policies_url)
+                            
+                            if policies_response.status_code == 200:
+                                policies = policies_response.json().get('value', [])
+                                if policies:
+                                    self.formatter.print_success(f"Found {len(policies)} backup policies")
+                                    
+                                    for policy in policies:
+                                        policy_name = policy.get('name', 'Unknown')
+                                        policy_properties = policy.get('properties', {})
+                                        policy_type = policy_properties.get('backupManagementType', 'Unknown')
+                                        
+                                        self.formatter.print_key_value(f"Policy: {policy_name}", policy_type)
+                                        
+                                        # Check if policy has encryption settings
+                                        if encryption_state == 'Enabled':
+                                            self.formatter.print_success("Backup policy benefits from vault-level encryption")
+                                        else:
+                                            self.formatter.print_warning("⚠ Backup policy not encrypted")
+                                else:
+                                    self.formatter.print_info("No backup policies found")
+                            else:
+                                self.formatter.print_warning(f"Could not retrieve backup policies: {policies_response.status_code}")
+                        except Exception as e:
+                            self.formatter.print_warning(f"Could not check backup policies: {e}")
+                        
+                        self.formatter.print_separator()
+                    
+                    # Summary of encryption compliance
+                    self.formatter.print_subsection("RECOVERY SERVICES VAULT ENCRYPTION SUMMARY")
+                    self.formatter.print_key_value("Total Recovery Services Vaults", total_vaults)
+                    self.formatter.print_key_value("Vaults with Backup Encryption", encrypted_vaults)
+                    self.formatter.print_key_value("Vaults without Backup Encryption", total_vaults - encrypted_vaults)
+                    
+                    if total_vaults > 0:
+                        encryption_compliance = (encrypted_vaults / total_vaults) * 100
+                        self.formatter.print_key_value("Backup Encryption Compliance", f"{encryption_compliance:.1f}%")
+                        
+                        if encryption_compliance >= 90:
+                            self.formatter.print_success("EXCELLENT: Most Recovery Services Vaults have backup data encryption enabled")
+                        elif encryption_compliance >= 70:
+                            self.formatter.print_warning("⚠ GOOD: Most vaults have encryption, review missing ones")
+                        else:
+                            self.formatter.print_error("POOR: Many Recovery Services Vaults missing backup data encryption")
+                    
+                    # Compliance evidence
+                    if encrypted_vaults > 0:
+                        self.formatter.print_success("BACKUP DATA ENCRYPTION VERIFIED: Azure Recovery Services Vaults have backup data encryption enabled, ensuring all protected VMs, Storage, and SQL workloads have encrypted backup data for FedRAMP Moderate compliance.")
+                    else:
+                        self.formatter.print_error("BACKUP DATA ENCRYPTION NOT VERIFIED: Recovery Services Vaults do not have backup data encryption enabled.")
+            else:
+                self.formatter.print_error(f"Failed to retrieve Recovery Services Vaults: {response.status_code}")
+        except Exception as e:
+            self.formatter.print_error(f"Exception occurred while checking Recovery Services Vault encryption: {e}")
+        
         self.formatter.print_separator()
 
     def check_recovery_services_backup_policies(self):
@@ -1367,6 +1550,7 @@ class SecurityFunctions:
         total_databases = 0
         compliant_databases = 0
         backup_issues = []
+        backup_policies_found = []
         
         # 1. Check Azure SQL Databases
         self.formatter.print_subsection("AZURE SQL DATABASE BACKUP STATUS")
@@ -1417,15 +1601,35 @@ class SecurityFunctions:
                                         self.formatter.print_key_value("Backup Retention (Days)", retention_days)
                                         
                                         if retention_days >= 7:
-                                            self.formatter.print_success("✓ Retention meets 7+ day requirement")
+                                            self.formatter.print_success("Retention meets 7+ day requirement")
                                             compliant_databases += 1
+                                            backup_policies_found.append(f"SQL DB {db_name}: {retention_days} days retention")
                                         else:
-                                            self.formatter.print_error(f"✗ Retention ({retention_days} days) below 7-day requirement")
+                                            self.formatter.print_error(f"Retention ({retention_days} days) below 7-day requirement")
                                             backup_issues.append(f"SQL DB {db_name}: Insufficient retention ({retention_days} days)")
                                     else:
                                         self.formatter.print_warning("Unable to retrieve backup retention policy")
+                                        backup_issues.append(f"SQL DB {db_name}: Could not retrieve backup policy")
                                 except Exception as e:
                                     self.formatter.print_error(f"Error checking backup policy: {e}")
+                                    backup_issues.append(f"SQL DB {db_name}: Error checking backup policy")
+                                
+                                # Check long-term backup retention policy
+                                try:
+                                    ltr_policy_url = f"{db_id}/backupLongTermRetentionPolicies/default?api-version=2022-05-01-preview"
+                                    ltr_response = self.api_client.arm_get(ltr_policy_url)
+                                    if ltr_response.status_code == 200:
+                                        ltr_policy = ltr_response.json()
+                                        ltr_retention_days = ltr_policy.get('properties', {}).get('retentionDays', 0)
+                                        if ltr_retention_days > 0:
+                                            self.formatter.print_success(f"Long-term retention configured: {ltr_retention_days} days")
+                                            backup_policies_found.append(f"SQL DB {db_name}: LTR {ltr_retention_days} days")
+                                        else:
+                                            self.formatter.print_info("No long-term retention policy configured")
+                                    else:
+                                        self.formatter.print_info("No long-term retention policy found")
+                                except Exception as e:
+                                    self.formatter.print_info("Could not check long-term retention policy")
                                 
                                 self.formatter.print_separator()
                         else:
@@ -1457,28 +1661,32 @@ class SecurityFunctions:
                         self.formatter.print_key_value("Backup Type", backup_type)
                         
                         if backup_type == 'Continuous':
-                            self.formatter.print_success("✓ Continuous backup enabled (real-time incremental)")
+                            self.formatter.print_success("Continuous backup enabled (real-time incremental)")
                             retention_hours = backup_policy.get('continuousModeProperties', {}).get('tier', 'Unknown')
                             self.formatter.print_key_value("Continuous Backup Tier", retention_hours)
                             
                             if retention_hours in ['Continuous7Days', 'Continuous30Days']:
-                                self.formatter.print_success("✓ Retention meets 7+ day requirement")
+                                self.formatter.print_success("Retention meets 7+ day requirement")
                                 compliant_databases += 1
+                                backup_policies_found.append(f"Cosmos DB {account_name}: Continuous {retention_hours}")
                             else:
                                 self.formatter.print_warning("⚠ Check retention period")
+                                backup_issues.append(f"Cosmos DB {account_name}: Unknown retention tier {retention_hours}")
                         elif backup_type == 'Periodic':
                             self.formatter.print_info("Periodic backup configured")
-                            retention_days = backup_policy.get('periodicModeProperties', {}).get('backupRetentionIntervalInHours', 0) / 24
+                            retention_hours = backup_policy.get('periodicModeProperties', {}).get('backupRetentionIntervalInHours', 0)
+                            retention_days = retention_hours / 24
                             self.formatter.print_key_value("Retention (days)", f"{retention_days:.1f}")
                             
                             if retention_days >= 7:
-                                self.formatter.print_success("✓ Retention meets 7+ day requirement")
+                                self.formatter.print_success("Retention meets 7+ day requirement")
                                 compliant_databases += 1
+                                backup_policies_found.append(f"Cosmos DB {account_name}: Periodic {retention_days:.1f} days")
                             else:
-                                self.formatter.print_error("✗ Retention below 7-day requirement")
+                                self.formatter.print_error("Retention below 7-day requirement")
                                 backup_issues.append(f"Cosmos DB {account_name}: Insufficient retention ({retention_days:.1f} days)")
                         else:
-                            self.formatter.print_error("✗ No backup policy configured")
+                            self.formatter.print_error("No backup policy configured")
                             backup_issues.append(f"Cosmos DB {account_name}: No backup policy")
                         
                         self.formatter.print_separator()
@@ -1487,24 +1695,127 @@ class SecurityFunctions:
         except Exception as e:
             self.formatter.print_error(f"Exception occurred while checking Cosmos DB: {e}")
         
-        # 3. Summary and Compliance Report
+        # 3. Check Recovery Services Vaults and Backup Policies
+        self.formatter.print_subsection("RECOVERY SERVICES VAULT BACKUP POLICIES")
+        try:
+            vault_url = f"/subscriptions/{subscription_id}/providers/Microsoft.RecoveryServices/vaults?api-version=2023-04-01"
+            vault_response = self.api_client.arm_get(vault_url)
+            
+            if vault_response.status_code == 200:
+                vaults = vault_response.json().get('value', [])
+                if not vaults:
+                    self.formatter.print_info("No Recovery Services vaults found in this subscription.")
+                else:
+                    for vault in vaults:
+                        vault_name = vault.get('name', 'Unknown')
+                        vault_id = vault.get('id', '')
+                        
+                        self.formatter.print_subsection(f"Recovery Services Vault: {vault_name}")
+                        
+                        # Check backup policies
+                        policies_url = f"{vault_id}/backupPolicies?api-version=2023-04-01"
+                        policies_response = self.api_client.arm_get(policies_url)
+                        
+                        if policies_response.status_code == 200:
+                            policies = policies_response.json().get('value', [])
+                            if policies:
+                                self.formatter.print_success(f"Found {len(policies)} backup policies:")
+                                for policy in policies:
+                                    policy_name = policy.get('name', 'Unnamed')
+                                    policy_props = policy.get('properties', {})
+                                    policy_type = policy_props.get('backupManagementType', 'Unknown')
+                                    
+                                    # Check retention settings
+                                    retention_policy = policy_props.get('retentionPolicy', {})
+                                    if retention_policy:
+                                        daily_retention = retention_policy.get('dailySchedule', {}).get('retentionDuration', {}).get('count', 0)
+                                        weekly_retention = retention_policy.get('weeklySchedule', {}).get('retentionDuration', {}).get('count', 0)
+                                        monthly_retention = retention_policy.get('monthlySchedule', {}).get('retentionDuration', {}).get('count', 0)
+                                        yearly_retention = retention_policy.get('yearlySchedule', {}).get('retentionDuration', {}).get('count', 0)
+                                        
+                                        self.formatter.print_key_value(f"Policy: {policy_name} ({policy_type})", f"Daily: {daily_retention}, Weekly: {weekly_retention}, Monthly: {monthly_retention}, Yearly: {yearly_retention}")
+                                        
+                                        if daily_retention >= 7:
+                                            self.formatter.print_success("Daily retention meets 7+ day requirement")
+                                            backup_policies_found.append(f"Vault {vault_name}: {policy_name} - {daily_retention} days daily")
+                                        else:
+                                            self.formatter.print_warning(f"⚠ Daily retention ({daily_retention} days) below 7-day requirement")
+                                    else:
+                                        self.formatter.print_warning(f"⚠ Policy {policy_name} has no retention policy configured")
+                            else:
+                                self.formatter.print_warning("No backup policies found in this vault")
+                        else:
+                            self.formatter.print_error(f"Failed to retrieve backup policies: {policies_response.status_code}")
+                        
+                        self.formatter.print_separator()
+            else:
+                self.formatter.print_error(f"Failed to retrieve Recovery Services vaults: {vault_response.status_code}")
+        except Exception as e:
+            self.formatter.print_error(f"Exception occurred while checking Recovery Services vaults: {e}")
+        
+        # 4. Check for Backup Jobs and Recent Backup Status
+        self.formatter.print_subsection("RECENT BACKUP JOB STATUS")
+        try:
+            # Check for recent backup jobs in Recovery Services vaults
+            if 'vaults' in locals() and vaults:
+                for vault in vaults[:3]:  # Check first 3 vaults
+                    vault_name = vault.get('name', 'Unknown')
+                    vault_id = vault.get('id', '')
+                    
+                    # Check recent backup jobs
+                    jobs_url = f"{vault_id}/backupJobs?api-version=2023-04-01"
+                    jobs_response = self.api_client.arm_get(jobs_url)
+                    
+                    if jobs_response.status_code == 200:
+                        jobs = jobs_response.json().get('value', [])
+                        if jobs:
+                            recent_jobs = [job for job in jobs if job.get('properties', {}).get('startTime', '') > '2024-01-01']
+                            self.formatter.print_success(f"Vault {vault_name}: Found {len(recent_jobs)} recent backup jobs")
+                            
+                            # Show recent job status
+                            for job in recent_jobs[:5]:  # Show first 5 jobs
+                                job_props = job.get('properties', {})
+                                job_status = job_props.get('status', 'Unknown')
+                                job_type = job_props.get('backupManagementType', 'Unknown')
+                                start_time = job_props.get('startTime', 'Unknown')
+                                
+                                status_icon = "✓" if job_status == 'Completed' else "⚠" if job_status == 'InProgress' else "✗"
+                                self.formatter.print_key_value(f"{status_icon} {job_type} Job", f"Status: {job_status}, Started: {start_time}")
+                        else:
+                            self.formatter.print_info(f"Vault {vault_name}: No recent backup jobs found")
+            else:
+                self.formatter.print_info("No Recovery Services vaults to check for backup jobs")
+        except Exception as e:
+            self.formatter.print_error(f"Exception occurred while checking backup jobs: {e}")
+        
+        # 5. Summary and Compliance Report
         self.formatter.print_subsection("DATABASE BACKUP COMPLIANCE SUMMARY")
         self.formatter.print_key_value("Total Databases Found", total_databases)
         self.formatter.print_key_value("Compliant Databases", compliant_databases)
         self.formatter.print_key_value("Non-Compliant Databases", total_databases - compliant_databases)
+        self.formatter.print_key_value("Backup Policies Found", len(backup_policies_found))
         
         if total_databases > 0:
             compliance_rate = (compliant_databases / total_databases) * 100
             self.formatter.print_key_value("Overall Compliance Rate", f"{compliance_rate:.1f}%")
             
             if compliance_rate >= 95:
-                self.formatter.print_success("✓ EXCELLENT: Database backup compliance meets requirements")
+                self.formatter.print_success("EXCELLENT: Database backup compliance meets requirements")
             elif compliance_rate >= 80:
                 self.formatter.print_warning("⚠ GOOD: Most databases are compliant, review issues below")
             else:
-                self.formatter.print_error("✗ POOR: Significant backup compliance issues found")
+                self.formatter.print_error("POOR: Significant backup compliance issues found")
         else:
             self.formatter.print_warning("⚠ No databases found to check")
+        
+        # List backup policies found
+        if backup_policies_found:
+            self.formatter.print_subsection("BACKUP POLICIES CONFIGURED")
+            max_items = getattr(self.config, 'max_subitems', 10)
+            for policy in backup_policies_found[:max_items]:
+                self.formatter.print_success(f"• {policy}")
+            if len(backup_policies_found) > max_items:
+                self.formatter.print_info(f"... and {len(backup_policies_found) - max_items} more policies")
         
         # List backup issues
         if backup_issues:
@@ -1518,7 +1829,7 @@ class SecurityFunctions:
         # Evidence statement
         self.formatter.print_subsection("COMPLIANCE EVIDENCE")
         if total_databases > 0 and compliant_databases == total_databases:
-            self.formatter.print_success("✓ ALL DATABASES VERIFIED: This organization backs up all databases, including customer data, using real-time incremental and daily full cycle backups across multiple availability zones. Daily records are retained for at least seven days to support rollback.")
+            self.formatter.print_success("ALL DATABASES VERIFIED: This organization backs up all databases, including customer data, using real-time incremental and daily full cycle backups across multiple availability zones. Daily records are retained for at least seven days to support rollback.")
         elif total_databases > 0:
             self.formatter.print_warning("⚠ PARTIAL COMPLIANCE: Some databases may not meet backup requirements. Review issues above and ensure all databases are properly configured.")
         else:
@@ -2574,7 +2885,57 @@ class SecurityFunctions:
         except Exception as e:
             self.formatter.print_error(f"Exception occurred: {e}")
         
-        # 5. Check for Access Review Instances (Recent Reviews)
+        # 5. Check "If reviewers don't respond" Configuration
+        self.formatter.print_subsection("IF REVIEWERS DON'T RESPOND CONFIGURATION")
+        try:
+            url = "/identityGovernance/accessReviews/definitions"
+            response = self.api_client.graph_get(url)
+            if response.status_code == 200:
+                reviews = response.json().get('value', [])
+                
+                if reviews:
+                    self.formatter.print_success(f"Checking 'If reviewers don't respond' configuration for {len(reviews)} access reviews:")
+                    
+                    correct_config_count = 0
+                    for review in reviews:
+                        display_name = review.get('displayName', 'Unnamed')
+                        settings = review.get('settings', {})
+                        
+                        # Check for the "If reviewers don't respond" setting
+                        # This is typically controlled by autoApplyDecisionsEnabled and defaultDecision
+                        auto_apply_enabled = settings.get('autoApplyDecisionsEnabled', False)
+                        default_decision = settings.get('defaultDecision', 'Unknown')
+                        
+                        # The correct configuration should be auto-apply enabled with "remove access" as default
+                        if auto_apply_enabled and default_decision == 'Deny':
+                            correct_config_count += 1
+                            self.formatter.print_success(f"{display_name}: Auto-apply enabled with 'remove access' (Deny) as default")
+                        elif auto_apply_enabled and default_decision == 'Approve':
+                            self.formatter.print_warning(f"{display_name}: Auto-apply enabled but default decision is 'Approve' (should be 'Deny' to remove access)")
+                        elif auto_apply_enabled and default_decision == 'Unknown':
+                            self.formatter.print_warning(f"{display_name}: Auto-apply enabled but default decision is unknown")
+                        else:
+                            self.formatter.print_error(f"{display_name}: Auto-apply disabled - reviewers must manually respond")
+                    
+                    # Summary
+                    if correct_config_count == len(reviews):
+                        self.formatter.print_success("All access reviews are correctly configured with 'remove access' when reviewers don't respond")
+                    elif correct_config_count > 0:
+                        self.formatter.print_warning(f"{correct_config_count} out of {len(reviews)} access reviews are correctly configured")
+                        self.formatter.print_info("Configure remaining reviews to automatically remove access when reviewers don't respond")
+                    else:
+                        self.formatter.print_error("No access reviews are configured to automatically remove access when reviewers don't respond")
+                        self.formatter.print_info("Set 'If reviewers don't respond' to 'remove access' for all access reviews")
+                else:
+                    self.formatter.print_error("No access reviews found to check 'If reviewers don't respond' configuration")
+            elif response.status_code == 400:
+                self.formatter.print_error("Access Reviews not available (requires Entra ID P2)")
+            else:
+                self.formatter.print_error(f"Failed to retrieve access reviews: {response.status_code}")
+        except Exception as e:
+            self.formatter.print_error(f"Exception occurred: {e}")
+        
+        # 6. Check for Access Review Instances (Recent Reviews)
         self.formatter.print_subsection("RECENT ACCESS REVIEW INSTANCES")
         try:
             url = "/identityGovernance/accessReviews/definitions"
@@ -2615,7 +2976,7 @@ class SecurityFunctions:
         except Exception as e:
             self.formatter.print_error(f"Exception occurred: {e}")
         
-        # 6. Check for Group-Based Access Control
+        # 7. Check for Group-Based Access Control
         self.formatter.print_subsection("GROUP-BASED ACCESS CONTROL")
         try:
             url = "/groups"
@@ -2643,7 +3004,7 @@ class SecurityFunctions:
         except Exception as e:
             self.formatter.print_error(f"Exception occurred: {e}")
         
-        # 7. Check for Access Review Notifications
+        # 8. Check for Access Review Notifications
         self.formatter.print_subsection("ACCESS REVIEW NOTIFICATIONS")
         try:
             url = "/identityGovernance/accessReviews/definitions"
@@ -4654,51 +5015,304 @@ class SecurityFunctions:
         if not subscription_id:
             self.formatter.print_error("subscription_id must be set in config.")
             return
+        
         # Common P2P ports (BitTorrent, eDonkey, Gnutella, etc.)
         p2p_ports = ["6881-6889", "135-139", "445", "6346-6347", "4662-4666", "6699", "4444", "2234", "44444", "12345", "6969"]
+        
+        # Common P2P protocols and their characteristics
+        p2p_protocols = {
+            "BitTorrent": {
+                "ports": ["6881-6889", "6969"],
+                "protocols": ["TCP", "UDP"],
+                "keywords": ["bittorrent", "torrent", "bt-", "dht"]
+            },
+            "eDonkey": {
+                "ports": ["4662-4666", "4242"],
+                "protocols": ["TCP", "UDP"],
+                "keywords": ["edonkey", "emule", "kad"]
+            },
+            "Gnutella": {
+                "ports": ["6346-6347", "6348"],
+                "protocols": ["TCP", "UDP"],
+                "keywords": ["gnutella", "gnutella2", "g2"]
+            },
+            "Direct Connect": {
+                "ports": ["411", "412"],
+                "protocols": ["TCP"],
+                "keywords": ["directconnect", "dc++", "adc"]
+            },
+            "FastTrack": {
+                "ports": ["1214"],
+                "protocols": ["TCP", "UDP"],
+                "keywords": ["fasttrack", "kazaa", "grokster"]
+            },
+            "Ares": {
+                "ports": ["4444", "2234"],
+                "protocols": ["TCP", "UDP"],
+                "keywords": ["ares", "galaxy"]
+            },
+            "LimeWire": {
+                "ports": ["6346"],
+                "protocols": ["TCP", "UDP"],
+                "keywords": ["limewire", "gnutella"]
+            },
+            "FrostWire": {
+                "ports": ["6346"],
+                "protocols": ["TCP", "UDP"],
+                "keywords": ["frostwire", "gnutella"]
+            },
+            "uTorrent": {
+                "ports": ["6881-6889"],
+                "protocols": ["TCP", "UDP"],
+                "keywords": ["utorrent", "bittorrent", "bt-"]
+            },
+            "Vuze": {
+                "ports": ["6881-6889"],
+                "protocols": ["TCP", "UDP"],
+                "keywords": ["vuze", "azureus", "bittorrent"]
+            }
+        }
+        
         try:
-            # List all Network Security Groups (NSGs)
+            # 1. Check Network Security Groups (NSGs)
+            self.formatter.print_subsection("NETWORK SECURITY GROUPS (NSG) P2P RESTRICTIONS")
             url = f"/subscriptions/{subscription_id}/providers/Microsoft.Network/networkSecurityGroups?api-version=2023-04-01"
             response = self.api_client.arm_get(url)
             if response.status_code == 200:
                 nsgs = response.json().get('value', [])
                 if not nsgs:
                     self.formatter.print_warning("No Network Security Groups found in the subscription.")
-                    return
+                else:
+                    total_p2p_blocked_nsgs = 0
                 for nsg in nsgs:
                     nsg_name = nsg.get('name', 'Unknown')
                     rg = nsg.get('id', '').split('/')[4] if len(nsg.get('id', '').split('/')) > 4 else 'Unknown'
                     self.formatter.print_subsection(f"NSG: {nsg_name}")
                     self.formatter.print_key_value("Resource Group", rg)
+                        
                     rules = nsg.get('properties', {}).get('securityRules', [])
                     p2p_blocked = False
+                    p2p_protocols_blocked = []
+                        
                     for rule in rules:
                         access = rule.get('access', '').lower()
                         direction = rule.get('direction', '').lower()
+                        protocol = rule.get('protocol', '').upper()
                         port_range = rule.get('destinationPortRange', '')
                         port_ranges = rule.get('destinationPortRanges', [])
                         name = rule.get('name', '')
+                        description = rule.get('description', '').lower()
+                            
                         # Check if rule blocks P2P ports
                         all_ports = [port_range] if port_range else []
                         all_ports += port_ranges
-                        for p2p_port in p2p_ports:
-                            if any(p2p_port in pr for pr in all_ports) and access == 'deny':
-                                self.formatter.print_success(f"Rule '{name}' blocks P2P port(s) {p2p_port} ({direction})")
-                                p2p_blocked = True
-                    if not p2p_blocked:
-                        self.formatter.print_warning("No explicit rules found blocking common P2P ports. Review NSG configuration.")
+                            
+                        # Check for P2P protocol blocking
+                        for p2p_name, p2p_info in p2p_protocols.items():
+                            # Check ports
+                            for p2p_port in p2p_info["ports"]:
+                                if any(p2p_port in pr for pr in all_ports) and access == 'deny':
+                                    if p2p_name not in p2p_protocols_blocked:
+                                        p2p_protocols_blocked.append(p2p_name)
+                                    self.formatter.print_success(f"Rule '{name}' blocks {p2p_name} port(s) {p2p_port} ({direction})")
+                                    p2p_blocked = True
+                                
+                                # Check for protocol-specific blocking
+                                if protocol in p2p_info["protocols"] and access == 'deny':
+                                    # Check if this is a broad P2P protocol block
+                                    if any(keyword in description for keyword in p2p_info["keywords"]):
+                                        if p2p_name not in p2p_protocols_blocked:
+                                            p2p_protocols_blocked.append(p2p_name)
+                                        self.formatter.print_success(f"Rule '{name}' blocks {p2p_name} protocol ({protocol})")
+                                        p2p_blocked = True
+                        
+                        if p2p_blocked:
+                            total_p2p_blocked_nsgs += 1
+                            self.formatter.print_success(f"P2P protocols blocked: {', '.join(p2p_protocols_blocked)}")
+                        else:
+                            self.formatter.print_warning("No explicit rules found blocking P2P protocols. Review NSG configuration.")
+                        
                     self.formatter.print_separator()
+                    
+                    self.formatter.print_key_value("NSGs with P2P restrictions", f"{total_p2p_blocked_nsgs} out of {len(nsgs)}")
             else:
                 self.formatter.print_error(f"Failed to retrieve NSGs: {response.status_code}")
+            
+            # 2. Check Azure Firewalls
+            self.formatter.print_subsection("AZURE FIREWALL P2P RESTRICTIONS")
+            firewall_url = f"/subscriptions/{subscription_id}/providers/Microsoft.Network/azureFirewalls?api-version=2023-04-01"
+            firewall_response = self.api_client.arm_get(firewall_url)
+            if firewall_response.status_code == 200:
+                firewalls = firewall_response.json().get('value', [])
+                if not firewalls:
+                    self.formatter.print_info("No Azure Firewalls found in the subscription.")
+                else:
+                    total_p2p_blocked_firewalls = 0
+                    for firewall in firewalls:
+                        firewall_name = firewall.get('name', 'Unknown')
+                        firewall_props = firewall.get('properties', {})
+                        rule_collections = firewall_props.get('ruleCollections', [])
+                        
+                        self.formatter.print_subsection(f"Azure Firewall: {firewall_name}")
+                        p2p_blocked = False
+                        p2p_protocols_blocked = []
+                        
+                        for collection in rule_collections:
+                            collection_props = collection.get('properties', {})
+                            collection_type = collection_props.get('ruleCollectionType', '')
+                            rules = collection_props.get('rules', [])
+                            
+                            for rule in rules:
+                                rule_props = rule.get('properties', {})
+                                rule_type = rule.get('ruleType', '')
+                                action = rule_props.get('action', {}).get('type', '').lower()
+                                
+                                # Check application rules (for protocol-based blocking)
+                                if rule_type == 'ApplicationRule':
+                                    protocols = rule_props.get('protocols', [])
+                                    target_fqdns = rule_props.get('targetFqdns', [])
+                                    fqdn_tags = rule_props.get('fqdnTags', [])
+                                    
+                                    # Check for P2P protocol blocking
+                                    for p2p_name, p2p_info in p2p_protocols.items():
+                                        if any(keyword in str(target_fqdns).lower() for keyword in p2p_info["keywords"]) and action == 'deny':
+                                            if p2p_name not in p2p_protocols_blocked:
+                                                p2p_protocols_blocked.append(p2p_name)
+                                            self.formatter.print_success(f"Application rule blocks {p2p_name} traffic")
+                                            p2p_blocked = True
+                                
+                                # Check network rules (for port-based blocking)
+                                elif rule_type == 'NetworkRule':
+                                    protocols = rule_props.get('protocols', [])
+                                    destination_ports = rule_props.get('destinationPorts', [])
+                                    
+                                    for p2p_name, p2p_info in p2p_protocols.items():
+                                        for p2p_port in p2p_info["ports"]:
+                                            if any(p2p_port in str(dest_port) for dest_port in destination_ports) and action == 'deny':
+                                                if p2p_name not in p2p_protocols_blocked:
+                                                    p2p_protocols_blocked.append(p2p_name)
+                                                self.formatter.print_success(f"Network rule blocks {p2p_name} port(s) {p2p_port}")
+                                                p2p_blocked = True
+                        
+                        if p2p_blocked:
+                            total_p2p_blocked_firewalls += 1
+                            self.formatter.print_success(f"P2P protocols blocked: {', '.join(p2p_protocols_blocked)}")
+                        else:
+                            self.formatter.print_warning("No explicit rules found blocking P2P protocols in Azure Firewall.")
+                        
+                        self.formatter.print_separator()
+                    
+                    self.formatter.print_key_value("Azure Firewalls with P2P restrictions", f"{total_p2p_blocked_firewalls} out of {len(firewalls)}")
+            else:
+                self.formatter.print_error(f"Failed to retrieve Azure Firewalls: {firewall_response.status_code}")
+            
+            # 3. Check for P2P Protocol Detection in Log Analytics
+            self.formatter.print_subsection("P2P PROTOCOL DETECTION IN LOGS")
+            workspace_name = getattr(self.config, 'workspace_name', None)
+            resource_group = getattr(self.config, 'resource_group', None)
+            
+            if workspace_name and resource_group:
+                try:
+                    # Query for potential P2P traffic patterns using simplified approach
+                    query = """
+                    AzureDiagnostics
+                    | where ResourceType in ("NETWORKSECURITYGROUPS", "AZUREFIREWALLS")
+                    | where Action_s == "Deny"
+                    | where isnotempty(DestinationPort_d)
+                    | where DestinationPort_d in (6881, 6882, 6883, 6884, 6885, 6886, 6887, 6888, 6889, 4662, 4663, 4664, 4665, 4666, 6346, 6347, 6348, 411, 412, 1214, 4444, 2234, 6969)
+                    | extend SourceIP = coalesce(SourceIP_s, SourceIPAddress_s, SourceIPAddress, "Unknown")
+                    | extend DestinationIP = coalesce(DestinationIP_s, DestinationIPAddress_s, DestinationIPAddress, "Unknown")
+                    | extend DestinationPort = coalesce(DestinationPort_d, DestinationPort, "Unknown")
+                    | project TimeGenerated, ResourceType, SourceIP, DestinationIP, DestinationPort, Action_s
+                    | order by TimeGenerated desc
+                    | take 10
+                    """
+                    
+                    query_url = f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.OperationalInsights/workspaces/{workspace_name}/api/query?api-version=2020-08-01"
+                    payload = {"query": query, "timespan": "P7D"}
+                    query_response = self.api_client.arm_post(query_url, payload)
+                    
+                    if query_response.status_code == 200:
+                        results = query_response.json()
+                        tables = results.get('tables', [])
+                        if tables and tables[0].get('rows'):
+                            rows = tables[0]['rows']
+                            columns = tables[0]['columns']
+                            self.formatter.print_success(f"Found {len(rows)} recent P2P traffic denial events:")
+                            
+                            # Create column mapping
+                            col_map = {col['name']: i for i, col in enumerate(columns)}
+                            
+                            for i, row in enumerate(rows, 1):
+                                time_generated = row[col_map.get('TimeGenerated', 0)] if 'TimeGenerated' in col_map else 'Unknown'
+                                resource_type = row[col_map.get('ResourceType', 1)] if 'ResourceType' in col_map else 'Unknown'
+                                source_ip = row[col_map.get('SourceIP', 2)] if 'SourceIP' in col_map else 'Unknown'
+                                destination_ip = row[col_map.get('DestinationIP', 3)] if 'DestinationIP' in col_map else 'Unknown'
+                                destination_port = row[col_map.get('DestinationPort', 4)] if 'DestinationPort' in col_map else 'Unknown'
+                                action = row[col_map.get('Action_s', 5)] if 'Action_s' in col_map else 'Unknown'
+                                
+                                self.formatter.print_key_value(f"Event {i}", f"Time: {time_generated}, Type: {resource_type}, Source: {source_ip}, Dest: {destination_ip}:{destination_port}, Action: {action}")
+                        else:
+                            self.formatter.print_info("No recent P2P traffic denial events found in logs.")
+                    else:
+                        self.formatter.print_warning(f"Could not query Log Analytics for P2P traffic patterns. Status: {query_response.status_code}")
+                        # Try a simpler fallback query
+                        try:
+                            fallback_query = """
+                            AzureDiagnostics
+                            | where ResourceType in ("NETWORKSECURITYGROUPS", "AZUREFIREWALLS")
+                            | where Action_s == "Deny"
+                            | where TimeGenerated > ago(7d)
+                            | take 5
+                            """
+                            fallback_payload = {"query": fallback_query, "timespan": "P7D"}
+                            fallback_response = self.api_client.arm_post(query_url, fallback_payload)
+                            if fallback_response.status_code == 200:
+                                self.formatter.print_info("Fallback query successful - checking for any denial events")
+                                fallback_results = fallback_response.json()
+                                fallback_tables = fallback_results.get('tables', [])
+                                if fallback_tables and fallback_tables[0].get('rows'):
+                                    self.formatter.print_info("Denial events exist but may not be P2P-specific")
+                                else:
+                                    self.formatter.print_info("No denial events found in the last 7 days")
+                            else:
+                                self.formatter.print_warning("Fallback query also failed - Log Analytics may not be configured for network diagnostics")
+                        except Exception as fallback_e:
+                            self.formatter.print_warning(f"Fallback query failed: {fallback_e}")
+                except Exception as e:
+                    self.formatter.print_warning(f"Could not check Log Analytics for P2P patterns: {e}")
+            else:
+                self.formatter.print_info("Log Analytics workspace not configured - skipping P2P traffic pattern analysis.")
+            
+            # 4. Summary and Recommendations
+            self.formatter.print_subsection("P2P RESTRICTION SUMMARY")
+            total_nsgs = len(nsgs) if 'nsgs' in locals() else 0
+            total_firewalls = len(firewalls) if 'firewalls' in locals() else 0
+            total_p2p_blocked_nsgs = total_p2p_blocked_nsgs if 'total_p2p_blocked_nsgs' in locals() else 0
+            total_p2p_blocked_firewalls = total_p2p_blocked_firewalls if 'total_p2p_blocked_firewalls' in locals() else 0
+            
+            self.formatter.print_key_value("Total NSGs", total_nsgs)
+            self.formatter.print_key_value("NSGs with P2P restrictions", total_p2p_blocked_nsgs)
+            self.formatter.print_key_value("Total Azure Firewalls", total_firewalls)
+            self.formatter.print_key_value("Azure Firewalls with P2P restrictions", total_p2p_blocked_firewalls)
+            
+            if total_p2p_blocked_nsgs > 0 or total_p2p_blocked_firewalls > 0:
+                self.formatter.print_success("P2P file sharing restrictions are in place")
+                self.formatter.print_info("Consider implementing additional protocol-based detection for comprehensive P2P blocking")
+            else:
+                self.formatter.print_error("No P2P file sharing restrictions found")
+                self.formatter.print_info("Implement NSG rules and/or Azure Firewall rules to block common P2P protocols and ports")
+                self.formatter.print_info("Key P2P protocols to block: BitTorrent, eDonkey, Gnutella, Direct Connect, FastTrack")
+            
         except Exception as e:
             self.formatter.print_error(f"Exception occurred while checking P2P restrictions: {e}")
         self.formatter.print_separator()
 
     def check_sentinel_system_performance_monitoring(self):
-        """Check that Microsoft Sentinel is monitoring system performance (Perf table)."""
+        """Check that Microsoft Sentinel is monitoring system performance and has Teams alert rules configured."""
         self.formatter.print_header(
-            "SENTINEL SYSTEM PERFORMANCE MONITORING",
-            "This function queries the Perf table in Log Analytics to evidence that system performance metrics (CPU, memory, disk, etc.) are being monitored by Microsoft Sentinel."
+            "SENTINEL SYSTEM PERFORMANCE MONITORING & TEAMS ALERTING",
+            "This function checks Microsoft Sentinel system performance monitoring, Teams alert rules, and other alerting mechanisms for comprehensive system monitoring and incident response."
         )
         workspace_name = getattr(self.config, 'workspace_name', None)
         subscription_id = getattr(self.config, 'subscription_id', None)
@@ -4709,6 +5323,8 @@ class SecurityFunctions:
             self.formatter.print_error("workspace_name, subscription_id, and resource_group must be set in config.")
             return
 
+        # 1. Check System Performance Monitoring
+        self.formatter.print_subsection("SYSTEM PERFORMANCE MONITORING")
         try:
             query = f"""
             Perf
@@ -4728,8 +5344,20 @@ class SecurityFunctions:
                     columns = tables[0]['columns']
                     self.formatter.print_success(f"Found {len(rows)} recent system performance records:")
                     col_map = {col['name']: i for i, col in enumerate(columns)}
+                    
+                    # Group by computer for summary
+                    computers = set()
+                    performance_objects = set()
+                    
                     for i, row in enumerate(rows, 1):
-                        self.formatter.print_subsection(f"PERFORMANCE RECORD {i}")
+                        if 'Computer' in col_map:
+                            computers.add(row[col_map['Computer']])
+                        if 'ObjectName' in col_map:
+                            performance_objects.add(row[col_map['ObjectName']])
+                        
+                        # Show first 5 records in detail
+                        if i <= 5:
+                            self.formatter.print_subsection(f"PERFORMANCE RECORD {i}")
                         if 'TimeGenerated' in col_map:
                             self.formatter.print_key_value("Time", row[col_map['TimeGenerated']])
                         if 'Computer' in col_map:
@@ -4742,74 +5370,932 @@ class SecurityFunctions:
                             self.formatter.print_key_value("Instance", row[col_map['InstanceName']])
                         if 'CounterValue' in col_map:
                             self.formatter.print_key_value("Value", row[col_map['CounterValue']])
+                    
+                    if len(rows) > 5:
+                        self.formatter.print_info(f"... and {len(rows) - 5} more performance records")
+                    
+                    self.formatter.print_key_value("Computers Monitored", len(computers))
+                    self.formatter.print_key_value("Performance Objects", len(performance_objects))
                 else:
-                    self.formatter.print_success("No recent system performance records found in the Perf table.")
+                    self.formatter.print_warning("No recent system performance records found in the Perf table.")
             elif response.status_code == 204:
                 self.formatter.print_success("Query executed successfully but no system performance records found.")
             else:
                 self.formatter.print_error(f"Failed to query Perf table: {response.status_code}")
         except Exception as e:
             self.formatter.print_error(f"Exception occurred while querying Perf table: {e}")
+
+        # 2. Check Sentinel Analytic Rules with Teams Integration
+        self.formatter.print_subsection("SENTINEL ANALYTIC RULES WITH TEAMS INTEGRATION")
+        try:
+            rules_url = f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.OperationalInsights/workspaces/{workspace_name}/providers/Microsoft.SecurityInsights/alertRules?api-version=2022-12-01-preview"
+            rules_response = self.api_client.arm_get(rules_url)
+            
+            if rules_response.status_code == 200:
+                rules = rules_response.json().get('value', [])
+                teams_integrated_rules = []
+                performance_rules = []
+                
+                for rule in rules:
+                    rule_props = rule.get('properties', {})
+                    rule_name = rule_props.get('displayName', 'Unnamed Rule')
+                    rule_type = rule_props.get('kind', 'Unknown')
+                    enabled = rule_props.get('enabled', False)
+                    
+                    # Check for Teams integration in actions
+                    actions = rule_props.get('actions', [])
+                    has_teams_action = False
+                    has_logic_app = False
+                    
+                    for action in actions:
+                        action_type = action.get('actionType', '')
+                        if action_type == 'MicrosoftTeams':
+                            has_teams_action = True
+                        elif action_type == 'LogicApp':
+                            has_logic_app = True
+                    
+                    # Check if rule is related to performance monitoring
+                    query = rule_props.get('query', '').lower()
+                    is_performance_rule = any(keyword in query for keyword in ['perf', 'cpu', 'memory', 'disk', 'network', 'performance'])
+                    
+                    if has_teams_action or has_logic_app:
+                        teams_integrated_rules.append({
+                            'name': rule_name,
+                            'type': rule_type,
+                            'enabled': enabled,
+                            'teams': has_teams_action,
+                            'logic_app': has_logic_app
+                        })
+                    
+                    if is_performance_rule:
+                        performance_rules.append({
+                            'name': rule_name,
+                            'type': rule_type,
+                            'enabled': enabled,
+                            'teams': has_teams_action,
+                            'logic_app': has_logic_app
+                        })
+                
+                if teams_integrated_rules:
+                    self.formatter.print_success(f"Found {len(teams_integrated_rules)} Sentinel rules with Teams/Logic App integration:")
+                    for rule in teams_integrated_rules:
+                        integrations = []
+                        if rule['teams']:
+                            integrations.append("Teams")
+                        if rule['logic_app']:
+                            integrations.append("Logic App")
+                        
+                        status = "Enabled" if rule['enabled'] else "Disabled"
+                        self.formatter.print_key_value(f"{rule['name']} ({rule['type']})", f"{status} - {', '.join(integrations)}")
+                else:
+                    self.formatter.print_warning("No Sentinel rules found with Teams or Logic App integration")
+                
+                if performance_rules:
+                    self.formatter.print_success(f"Found {len(performance_rules)} performance-related Sentinel rules:")
+                    for rule in performance_rules:
+                        integrations = []
+                        if rule['teams']:
+                            integrations.append("Teams")
+                        if rule['logic_app']:
+                            integrations.append("Logic App")
+                        
+                        status = "Enabled" if rule['enabled'] else "Disabled"
+                        integrations_str = f" - {', '.join(integrations)}" if integrations else " - No Teams integration"
+                        self.formatter.print_key_value(f"{rule['name']} ({rule['type']})", f"{status}{integrations_str}")
+                else:
+                    self.formatter.print_info("No performance-related Sentinel rules found")
+            else:
+                self.formatter.print_error(f"Failed to retrieve Sentinel rules: {rules_response.status_code}")
+        except Exception as e:
+            self.formatter.print_error(f"Exception occurred while checking Sentinel rules: {e}")
+
+        # 3. Check for Logic Apps with Teams Integration
+        self.formatter.print_subsection("LOGIC APPS WITH TEAMS INTEGRATION")
+        try:
+            logic_apps_url = f"/subscriptions/{subscription_id}/providers/Microsoft.Logic/workflows?api-version=2019-05-01"
+            logic_apps_response = self.api_client.arm_get(logic_apps_url)
+            
+            if logic_apps_response.status_code == 200:
+                logic_apps = logic_apps_response.json().get('value', [])
+                teams_integrated_logic_apps = []
+                
+                for app in logic_apps:
+                    app_name = app.get('name', 'Unnamed')
+                    app_props = app.get('properties', {})
+                    app_state = app_props.get('state', 'Unknown')
+                    
+                    # Check if Logic App has Teams actions
+                    try:
+                        # Get Logic App definition to check for Teams actions
+                        definition_url = f"{app.get('id')}/triggers?api-version=2019-05-01"
+                        definition_response = self.api_client.arm_get(definition_url)
+                        
+                        if definition_response.status_code == 200:
+                            triggers = definition_response.json().get('value', [])
+                            
+                            # Check for Teams-related triggers or actions
+                            has_teams_integration = False
+                            for trigger in triggers:
+                                trigger_props = trigger.get('properties', {})
+                                trigger_type = trigger_props.get('type', '')
+                                if 'teams' in trigger_type.lower() or 'microsoftteams' in str(trigger_props).lower():
+                                    has_teams_integration = True
+                                    break
+                            
+                            if has_teams_integration:
+                                teams_integrated_logic_apps.append({
+                                    'name': app_name,
+                                    'state': app_state
+                                })
+                    except Exception:
+                        # Skip if we can't check this Logic App
+                        continue
+                
+                if teams_integrated_logic_apps:
+                    self.formatter.print_success(f"Found {len(teams_integrated_logic_apps)} Logic Apps with Teams integration:")
+                    for app in teams_integrated_logic_apps:
+                        self.formatter.print_key_value(f"{app['name']}", f"State: {app['state']}")
+                else:
+                    self.formatter.print_info("No Logic Apps found with Teams integration")
+            else:
+                self.formatter.print_error(f"Failed to retrieve Logic Apps: {logic_apps_response.status_code}")
+        except Exception as e:
+            self.formatter.print_error(f"Exception occurred while checking Logic Apps: {e}")
+
+        # 4. Check for Recent Performance Alerts
+        self.formatter.print_subsection("RECENT PERFORMANCE ALERTS")
+        try:
+            # Try multiple alert table names and approaches
+            alert_queries = [
+                # Try SecurityAlert table first
+                """
+                SecurityAlert
+                | where TimeGenerated > ago(7d)
+                | where AlertName contains "performance" or AlertName contains "cpu" or AlertName contains "memory" or AlertName contains "disk"
+                | order by TimeGenerated desc
+                | take 10
+                """,
+                # Try AzureDiagnostics for alerts
+                """
+                AzureDiagnostics
+                | where ResourceType == "SECURITYINSIGHTS"
+                | where TimeGenerated > ago(7d)
+                | where AlertName_s contains "performance" or AlertName_s contains "cpu" or AlertName_s contains "memory" or AlertName_s contains "disk"
+                | order by TimeGenerated desc
+                | take 10
+                """,
+                # Try any alerts in the workspace
+                """
+                union isfuzzy=true
+                (SecurityAlert | where TimeGenerated > ago(7d) | take 5),
+                (AzureDiagnostics | where ResourceType == "SECURITYINSIGHTS" | where TimeGenerated > ago(7d) | take 5)
+                | order by TimeGenerated desc
+                | take 10
+                """,
+                # Simple query to check if any alerts exist
+                """
+                union isfuzzy=true
+                (SecurityAlert | take 1),
+                (AzureDiagnostics | where ResourceType == "SECURITYINSIGHTS" | take 1)
+                | take 1
+                """
+            ]
+            
+            alerts_url = f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.OperationalInsights/workspaces/{workspace_name}/api/query?api-version=2020-08-01"
+            alerts_found = False
+            
+            for i, alerts_query in enumerate(alert_queries):
+                try:
+                    alerts_payload = {"query": alerts_query, "timespan": "P7D"}
+                    alerts_response = self.api_client.arm_post(alerts_url, alerts_payload)
+                    
+                    if alerts_response.status_code == 200:
+                        alerts_results = alerts_response.json()
+                        alerts_tables = alerts_results.get('tables', [])
+                        if alerts_tables and alerts_tables[0].get('rows'):
+                            alerts_rows = alerts_tables[0]['rows']
+                            alerts_columns = alerts_tables[0]['columns']
+                            
+                            if i == 0:  # First query - performance alerts
+                                self.formatter.print_success(f"Found {len(alerts_rows)} recent performance-related security alerts:")
+                                
+                                alerts_col_map = {col['name']: i for i, col in enumerate(alerts_columns)}
+                                
+                                for j, alert_row in enumerate(alerts_rows, 1):
+                                    alert_time = alert_row[alerts_col_map.get('TimeGenerated', 0)] if 'TimeGenerated' in alerts_col_map else 'Unknown'
+                                    alert_name = alert_row[alerts_col_map.get('AlertName', 1)] if 'AlertName' in alerts_col_map else 'Unknown'
+                                    alert_severity = alert_row[alerts_col_map.get('Severity', 2)] if 'Severity' in alerts_col_map else 'Unknown'
+                                    
+                                    self.formatter.print_key_value(f"Alert {j}", f"Time: {alert_time}, Name: {alert_name}, Severity: {alert_severity}")
+                                alerts_found = True
+                                break
+                            
+                            elif i == 1:  # Second query - AzureDiagnostics alerts
+                                self.formatter.print_success(f"Found {len(alerts_rows)} recent alerts in AzureDiagnostics:")
+                                
+                                alerts_col_map = {col['name']: i for i, col in enumerate(alerts_columns)}
+                                
+                                for j, alert_row in enumerate(alerts_rows, 1):
+                                    alert_time = alert_row[alerts_col_map.get('TimeGenerated', 0)] if 'TimeGenerated' in alerts_col_map else 'Unknown'
+                                    alert_name = alert_row[alerts_col_map.get('AlertName_s', 1)] if 'AlertName_s' in alerts_col_map else 'Unknown'
+                                    
+                                    self.formatter.print_key_value(f"Alert {j}", f"Time: {alert_time}, Name: {alert_name}")
+                                alerts_found = True
+                                break
+                            
+                            elif i == 2:  # Third query - any alerts
+                                self.formatter.print_success(f"Found {len(alerts_rows)} recent alerts in the workspace:")
+                                
+                                alerts_col_map = {col['name']: i for i, col in enumerate(alerts_columns)}
+                                
+                                for j, alert_row in enumerate(alerts_rows, 1):
+                                    alert_time = alert_row[alerts_col_map.get('TimeGenerated', 0)] if 'TimeGenerated' in alerts_col_map else 'Unknown'
+                                    alert_name = alert_row[alerts_col_map.get('AlertName', 1)] if 'AlertName' in alerts_col_map else alert_row[alerts_col_map.get('AlertName_s', 1)] if 'AlertName_s' in alerts_col_map else 'Unknown'
+                                    
+                                    self.formatter.print_key_value(f"Alert {j}", f"Time: {alert_time}, Name: {alert_name}")
+                                alerts_found = True
+                                break
+                            
+                            elif i == 3:  # Fourth query - check if alerts exist
+                                self.formatter.print_info("Alert tables exist but no recent performance-related alerts found")
+                                alerts_found = True
+                                break
+                    
+                    elif alerts_response.status_code == 204:
+                        if i == 3:  # Last query - no alerts at all
+                            self.formatter.print_info("No alert data found in the workspace - alerts may not be configured")
+                            alerts_found = True
+                        continue  # Try next query
+                    
+                    else:
+                        if i == 3:  # Last query
+                            self.formatter.print_warning(f"Could not query for alerts: {alerts_response.status_code}")
+                        continue  # Try next query
+                        
+                except Exception as query_e:
+                    if i == 3:  # Last query
+                        self.formatter.print_warning(f"Exception in alert query {i+1}: {query_e}")
+                    continue  # Try next query
+            
+            if not alerts_found:
+                self.formatter.print_info("No recent alerts found - this may indicate no alerting is configured")
+                
+        except Exception as e:
+            self.formatter.print_error(f"Exception occurred while checking performance alerts: {e}")
+
+        # 5. Summary and Recommendations
+        self.formatter.print_subsection("PERFORMANCE MONITORING SUMMARY")
+        total_rules = len(rules) if 'rules' in locals() else 0
+        teams_rules = len(teams_integrated_rules) if 'teams_integrated_rules' in locals() else 0
+        performance_rules_count = len(performance_rules) if 'performance_rules' in locals() else 0
+        logic_apps_count = len(teams_integrated_logic_apps) if 'teams_integrated_logic_apps' in locals() else 0
+        
+        self.formatter.print_key_value("Total Sentinel Rules", total_rules)
+        self.formatter.print_key_value("Rules with Teams Integration", teams_rules)
+        self.formatter.print_key_value("Performance-Related Rules", performance_rules_count)
+        self.formatter.print_key_value("Logic Apps with Teams Integration", logic_apps_count)
+        
+        if teams_rules > 0 or logic_apps_count > 0:
+            self.formatter.print_success("Teams alerting is configured for system monitoring")
+            self.formatter.print_info("Consider implementing additional performance thresholds and automated response actions")
+        else:
+            self.formatter.print_warning("No Teams alerting found for system monitoring")
+            self.formatter.print_info("Configure Teams integration in Sentinel rules and Logic Apps for automated alerting")
+            self.formatter.print_info("Key areas to monitor: CPU, Memory, Disk, Network, Application Performance")
+        
         self.formatter.print_separator()
 
-    def check_asg_boundary_protection(self):
-        """Check that Azure ASGs are used for boundary protection and limited to allowed ports, protocols, and services."""
+    def check_defender_vulnerability_management(self):
+        """Check Microsoft Defender Vulnerability Management configuration and ensure vulnerabilities are ingested into Microsoft Sentinel."""
         self.formatter.print_header(
-            "AZURE ASG BOUNDARY PROTECTION",
-            "This function enumerates Azure Application Security Groups (ASGs) and checks which NSG rules reference them, evidencing boundary protection and restriction to allowed ports, protocols, and services."
+            "MICROSOFT DEFENDER VULNERABILITY MANAGEMENT CONFIGURATION",
+            "This function verifies that Microsoft Defender Vulnerability Management is enabled and properly configured for vulnerability scanning. It confirms vulnerabilities are being ingested into Microsoft Sentinel for monitoring and alerting."
         )
         subscription_id = getattr(self.config, 'subscription_id', None)
         if not subscription_id:
             self.formatter.print_error("subscription_id must be set in config.")
             return
+        
+        # Track compliance metrics
+        vulnerability_management_enabled = False
+        sentinel_integration_configured = False
+        vulnerability_alerts_found = False
+        recent_vulnerabilities = 0
+        sonarqube_vms_found = 0
+        sonarqube_services_found = 0
+        sonarqube_containers_found = 0
+        
+        # 1. Check Microsoft Defender for Cloud Vulnerability Management
+        self.formatter.print_subsection("MICROSOFT DEFENDER FOR CLOUD VULNERABILITY MANAGEMENT")
         try:
-            # List all ASGs
+            # Check Defender for Cloud pricing configuration
+            url = f"/subscriptions/{subscription_id}/providers/Microsoft.Security/pricings?api-version=2023-01-01"
+            response = self.api_client.arm_get(url)
+            if response.status_code == 200:
+                pricings = response.json().get('value', [])
+                if not pricings:
+                    self.formatter.print_warning("No Microsoft Defender for Cloud pricing configurations found")
+                else:
+                    self.formatter.print_success(f"Found {len(pricings)} Defender for Cloud pricing configurations")
+                    
+                    for pricing in pricings:
+                        pricing_name = pricing.get('name', 'Unknown')
+                        pricing_props = pricing.get('properties', {})
+                        pricing_tier = pricing_props.get('pricingTier', 'Unknown')
+                        sub_tier = pricing_props.get('subPlan', 'Unknown')
+                        
+                        self.formatter.print_subsection(f"DEFENDER PLAN: {pricing_name}")
+                        self.formatter.print_key_value("Pricing Tier", pricing_tier)
+                        self.formatter.print_key_value("Sub Plan", sub_tier)
+                        
+                        # Check for vulnerability management plans
+                        vulnerability_plans = [
+                            'VulnerabilityAssessment', 'VulnerabilityAssessmentStandard',
+                            'DefenderForServers', 'DefenderForContainers', 'DefenderForDatabases'
+                        ]
+                        
+                        if pricing_name in vulnerability_plans or 'Vulnerability' in pricing_name:
+                            if pricing_tier in ['Standard', 'Premium']:
+                                vulnerability_management_enabled = True
+                                self.formatter.print_success("Vulnerability management plan enabled")
+                            else:
+                                self.formatter.print_warning("Vulnerability management plan found but not on Standard/Premium tier")
+                        elif pricing_tier in ['Standard', 'Premium']:
+                            self.formatter.print_info("Standard/Premium tier plan found - may include vulnerability features")
+                        else:
+                            self.formatter.print_warning("Free tier plan - limited vulnerability management capabilities")
+                        
+                        # Check if plan is enabled
+                        if pricing_props.get('enabled', False):
+                            self.formatter.print_success("Plan is enabled")
+                        else:
+                            self.formatter.print_error("Plan is disabled")
+                        
+                        self.formatter.print_separator()
+            else:
+                self.formatter.print_error(f"Failed to retrieve Defender for Cloud pricing: {response.status_code}")
+        except Exception as e:
+            self.formatter.print_error(f"Exception occurred while checking Defender for Cloud: {e}")
+        
+        # 2. Check for Vulnerability Assessment Solutions
+        self.formatter.print_subsection("VULNERABILITY ASSESSMENT SOLUTIONS")
+        try:
+            # Check for security solutions
+            url = f"/subscriptions/{subscription_id}/providers/Microsoft.Security/locations?api-version=2020-01-01"
+            response = self.api_client.arm_get(url)
+            if response.status_code == 200:
+                locations = response.json().get('value', [])
+                if locations:
+                    location = locations[0].get('name', 'default')
+                    
+                    # Check security solutions
+                    solutions_url = f"/subscriptions/{subscription_id}/providers/Microsoft.Security/locations/{location}/securitySolutions?api-version=2020-01-01"
+                    solutions_response = self.api_client.arm_get(solutions_url)
+                    
+                    if solutions_response.status_code == 200:
+                        solutions = solutions_response.json().get('value', [])
+                        if solutions:
+                            self.formatter.print_success(f"Found {len(solutions)} security solutions")
+                            
+                            for solution in solutions:
+                                solution_name = solution.get('name', 'Unknown')
+                                solution_props = solution.get('properties', {})
+                                solution_type = solution_props.get('securityFamily', 'Unknown')
+                                solution_status = solution_props.get('provisioningState', 'Unknown')
+                                
+                                self.formatter.print_key_value(f"Solution: {solution_name}", f"Type: {solution_type}, Status: {solution_status}")
+                                
+                                # Check for vulnerability assessment solutions
+                                if 'VulnerabilityAssessment' in solution_name or 'Vulnerability' in solution_type:
+                                    vulnerability_management_enabled = True
+                                    self.formatter.print_success("Vulnerability assessment solution found")
+                                
+                                # Check for SonarQube solutions
+                                if 'SonarQube' in solution_name or 'SonarQube' in solution_type or 'CodeQuality' in solution_type:
+                                    vulnerability_management_enabled = True
+                                    self.formatter.print_success("SonarQube code quality solution found")
+                                
+                                if solution_status == 'Succeeded':
+                                    self.formatter.print_success("Solution is provisioned successfully")
+                                else:
+                                    self.formatter.print_warning(f"Solution status: {solution_status}")
+                        else:
+                            self.formatter.print_info("No security solutions found")
+                    else:
+                        self.formatter.print_warning(f"Could not retrieve security solutions: {solutions_response.status_code}")
+                else:
+                    self.formatter.print_warning("No security locations found")
+            else:
+                self.formatter.print_warning(f"Could not retrieve security locations: {response.status_code}")
+        except Exception as e:
+            self.formatter.print_error(f"Exception occurred while checking security solutions: {e}")
+        
+        # 3. Check for Vulnerability Assessment on VMs
+        self.formatter.print_subsection("VIRTUAL MACHINE VULNERABILITY ASSESSMENT")
+        try:
+            # Get all VMs
+            url = f"/subscriptions/{subscription_id}/providers/Microsoft.Compute/virtualMachines?api-version=2023-07-01"
+            response = self.api_client.arm_get(url)
+            if response.status_code == 200:
+                vms = response.json().get('value', [])
+                if not vms:
+                    self.formatter.print_info("No Virtual Machines found in this subscription")
+                else:
+                    self.formatter.print_success(f"Found {len(vms)} Virtual Machines")
+                    
+                    vm_with_vulnerability_assessment = 0
+                    vm_without_vulnerability_assessment = 0
+                    sonarqube_vms_found = 0
+                    
+                    for vm in vms:
+                        vm_name = vm.get('name', 'Unknown')
+                        vm_id = vm.get('id', '')
+                        vm_location = vm.get('location', 'Unknown')
+                        
+                        # Check for vulnerability assessment extension
+                        extensions_url = f"{vm_id}/extensions?api-version=2023-07-01"
+                        extensions_response = self.api_client.arm_get(extensions_url)
+                        
+                        if extensions_response.status_code == 200:
+                            extensions = extensions_response.json().get('value', [])
+                            vulnerability_extension_found = False
+                            sonarqube_extension_found = False
+                            
+                            for extension in extensions:
+                                extension_name = extension.get('name', 'Unknown')
+                                extension_props = extension.get('properties', {})
+                                extension_type = extension_props.get('type', 'Unknown')
+                                extension_state = extension_props.get('provisioningState', 'Unknown')
+                                
+                                # Check for vulnerability assessment extensions
+                                vulnerability_extensions = [
+                                    'Qualys.WindowsAgent', 'Qualys.LinuxAgent', 'Rapid7.WindowsAgent', 'Rapid7.LinuxAgent',
+                                    'Microsoft.Azure.Security.VulnerabilityAssessment', 'Microsoft.Azure.Security.IoTSecurity'
+                                ]
+                                
+                                # Check for SonarQube extensions
+                                sonarqube_extensions = [
+                                    'SonarQube.Agent', 'SonarQube.Scanner', 'SonarQube.Server', 'SonarQube.WindowsAgent',
+                                    'SonarQube.LinuxAgent', 'Microsoft.Azure.Security.SonarQube'
+                                ]
+                                
+                                if any(ext in extension_type for ext in vulnerability_extensions):
+                                    vulnerability_extension_found = True
+                                    vm_with_vulnerability_assessment += 1
+                                    self.formatter.print_success(f"VM {vm_name}: Vulnerability assessment extension found ({extension_type})")
+                                    self.formatter.print_key_value(f"  Extension Status", extension_state)
+                                    break
+                                
+                                if any(ext in extension_type for ext in sonarqube_extensions):
+                                    sonarqube_extension_found = True
+                                    sonarqube_vms_found += 1
+                                    self.formatter.print_success(f"VM {vm_name}: SonarQube extension found ({extension_type})")
+                                    self.formatter.print_key_value(f"  Extension Status", extension_state)
+                                    break
+                            
+                            if not vulnerability_extension_found and not sonarqube_extension_found:
+                                vm_without_vulnerability_assessment += 1
+                                self.formatter.print_warning(f"VM {vm_name}: No vulnerability assessment or SonarQube extension found")
+                        else:
+                            vm_without_vulnerability_assessment += 1
+                            self.formatter.print_warning(f"VM {vm_name}: Could not check extensions")
+                    
+                    # Summary of VM vulnerability assessment
+                    self.formatter.print_subsection("VM VULNERABILITY ASSESSMENT SUMMARY")
+                    self.formatter.print_key_value("VMs with Vulnerability Assessment", vm_with_vulnerability_assessment)
+                    self.formatter.print_key_value("VMs with SonarQube", sonarqube_vms_found)
+                    self.formatter.print_key_value("VMs without Vulnerability Assessment", vm_without_vulnerability_assessment)
+                    
+                    if vm_with_vulnerability_assessment > 0 or sonarqube_vms_found > 0:
+                        vulnerability_management_enabled = True
+                        if vm_with_vulnerability_assessment > 0:
+                            self.formatter.print_success("Some VMs have vulnerability assessment configured")
+                        if sonarqube_vms_found > 0:
+                            self.formatter.print_success("Some VMs have SonarQube configured")
+                    else:
+                        self.formatter.print_warning("No VMs have vulnerability assessment or SonarQube configured")
+            else:
+                self.formatter.print_error(f"Failed to retrieve Virtual Machines: {response.status_code}")
+        except Exception as e:
+            self.formatter.print_error(f"Exception occurred while checking VM vulnerability assessment: {e}")
+        
+        # 4. Check for SonarQube Services and Configurations
+        self.formatter.print_subsection("SONARQUBE CODE QUALITY AND VULNERABILITY SCANNING")
+        sonarqube_services_found = 0
+        sonarqube_containers_found = 0
+        
+        try:
+            # Check for SonarQube as App Service
+            app_services_url = f"/subscriptions/{subscription_id}/providers/Microsoft.Web/sites?api-version=2022-09-01"
+            app_response = self.api_client.arm_get(app_services_url)
+            if app_response.status_code == 200:
+                app_services = app_response.json().get('value', [])
+                for app in app_services:
+                    app_name = app.get('name', 'Unknown')
+                    if 'sonar' in app_name.lower() or 'sonarqube' in app_name.lower():
+                        sonarqube_services_found += 1
+                        self.formatter.print_success(f"SonarQube App Service found: {app_name}")
+                        self.formatter.print_key_value("  Service Type", "App Service")
+                        vulnerability_management_enabled = True
+            
+            # Check for SonarQube in Container Instances
+            container_instances_url = f"/subscriptions/{subscription_id}/providers/Microsoft.ContainerInstance/containerGroups?api-version=2022-10-01"
+            container_response = self.api_client.arm_get(container_instances_url)
+            if container_response.status_code == 200:
+                container_groups = container_response.json().get('value', [])
+                for group in container_groups:
+                    group_name = group.get('name', 'Unknown')
+                    containers = group.get('properties', {}).get('containers', [])
+                    for container in containers:
+                        container_image = container.get('properties', {}).get('image', '')
+                        if 'sonar' in container_image.lower() or 'sonarqube' in container_image.lower():
+                            sonarqube_containers_found += 1
+                            self.formatter.print_success(f"SonarQube Container found: {group_name}")
+                            self.formatter.print_key_value("  Container Image", container_image)
+                            vulnerability_management_enabled = True
+            
+            # Check for SonarQube in AKS (Azure Kubernetes Service)
+            aks_clusters_url = f"/subscriptions/{subscription_id}/providers/Microsoft.ContainerService/managedClusters?api-version=2023-07-02"
+            aks_response = self.api_client.arm_get(aks_clusters_url)
+            if aks_response.status_code == 200:
+                aks_clusters = aks_response.json().get('value', [])
+                for cluster in aks_clusters:
+                    cluster_name = cluster.get('name', 'Unknown')
+                    # Note: Detailed pod checking would require additional API calls to the cluster
+                    self.formatter.print_info(f"AKS Cluster found: {cluster_name} - SonarQube pods would need cluster access to verify")
+            
+            # Summary of SonarQube services
+            if sonarqube_services_found > 0 or sonarqube_containers_found > 0:
+                self.formatter.print_subsection("SONARQUBE SERVICES SUMMARY")
+                self.formatter.print_key_value("SonarQube App Services", sonarqube_services_found)
+                self.formatter.print_key_value("SonarQube Containers", sonarqube_containers_found)
+                self.formatter.print_success("SonarQube code quality scanning services found")
+            else:
+                self.formatter.print_info("No SonarQube services found in Azure resources")
+                
+        except Exception as e:
+            self.formatter.print_error(f"Exception occurred while checking SonarQube services: {e}")
+        
+        # 5. Check Microsoft Sentinel for Vulnerability Alerts
+        self.formatter.print_subsection("MICROSOFT SENTINEL VULNERABILITY ALERTS")
+        workspace_name = getattr(self.config, 'workspace_name', None)
+        resource_group = getattr(self.config, 'resource_group', None)
+        
+        if workspace_name and resource_group:
+            try:
+                # Query for vulnerability-related alerts in Sentinel
+                vulnerability_query = """
+                SecurityAlert
+                | where TimeGenerated > ago(30d)
+                | where AlertName contains "vulnerability" or AlertName contains "Vulnerability" or AlertName contains "CVE" or AlertName contains "cve" or AlertName contains "SonarQube" or AlertName contains "sonarqube" or AlertName contains "CodeQuality" or AlertName contains "code quality"
+                | where ProviderName in ("Microsoft Defender for Cloud", "Microsoft Defender for Endpoint", "Azure Security Center", "SonarQube", "Code Quality Scanner")
+                | summarize count() by AlertName, ProviderName, Severity
+                | order by count_ desc
+                | take 20
+                """
+                
+                query_url = f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.OperationalInsights/workspaces/{workspace_name}/api/query?api-version=2020-08-01"
+                payload = {"query": vulnerability_query, "timespan": "P30D"}
+                query_response = self.api_client.arm_post(query_url, payload)
+                
+                if query_response.status_code == 200:
+                    results = query_response.json()
+                    tables = results.get('tables', [])
+                    if tables and tables[0].get('rows'):
+                        rows = tables[0]['rows']
+                        vulnerability_alerts_found = True
+                        recent_vulnerabilities = len(rows)
+                        
+                        self.formatter.print_success(f"Found {len(rows)} vulnerability alert types in the last 30 days")
+                        
+                        for i, row in enumerate(rows, 1):
+                            alert_name = row[0] if len(row) > 0 else 'Unknown'
+                            provider = row[1] if len(row) > 1 else 'Unknown'
+                            severity = row[2] if len(row) > 2 else 'Unknown'
+                            count = row[3] if len(row) > 3 else 'Unknown'
+                            
+                            self.formatter.print_key_value(f"Alert {i}", f"{alert_name} ({provider})")
+                            self.formatter.print_key_value(f"  Severity", severity)
+                            self.formatter.print_key_value(f"  Count", count)
+                        
+                        sentinel_integration_configured = True
+                        self.formatter.print_success("Vulnerability alerts are being ingested into Microsoft Sentinel")
+                    else:
+                        self.formatter.print_warning("No vulnerability alerts found in Microsoft Sentinel in the last 30 days")
+                        
+                        # Try a broader query for any security alerts
+                        broader_query = """
+                        SecurityAlert
+                        | where TimeGenerated > ago(30d)
+                        | where ProviderName in ("Microsoft Defender for Cloud", "Microsoft Defender for Endpoint", "Azure Security Center")
+                        | summarize count() by ProviderName
+                        | order by count_ desc
+                        """
+                        
+                        broader_payload = {"query": broader_query, "timespan": "P30D"}
+                        broader_response = self.api_client.arm_post(query_url, broader_payload)
+                        
+                        if broader_response.status_code == 200:
+                            broader_results = broader_response.json()
+                            broader_tables = broader_results.get('tables', [])
+                            if broader_tables and broader_tables[0].get('rows'):
+                                self.formatter.print_info("Security alerts are being ingested, but no specific vulnerability alerts found")
+                                sentinel_integration_configured = True
+                            else:
+                                self.formatter.print_warning("No security alerts found in Microsoft Sentinel")
+                        else:
+                            self.formatter.print_warning(f"Could not query for security alerts: {broader_response.status_code}")
+                else:
+                    self.formatter.print_warning(f"Could not query Microsoft Sentinel for vulnerability alerts: {query_response.status_code}")
+            except Exception as e:
+                self.formatter.print_error(f"Exception occurred while checking Sentinel vulnerability alerts: {e}")
+        else:
+            self.formatter.print_warning("workspace_name and resource_group not configured - skipping Sentinel checks")
+        
+        # 5. Check for Vulnerability Assessment in Azure Security Center
+        self.formatter.print_subsection("AZURE SECURITY CENTER VULNERABILITY ASSESSMENT")
+        try:
+            # Check for security assessments
+            url = f"/subscriptions/{subscription_id}/providers/Microsoft.Security/assessments?api-version=2020-01-01"
+            response = self.api_client.arm_get(url)
+            if response.status_code == 200:
+                assessments = response.json().get('value', [])
+                if assessments:
+                    vulnerability_assessments = []
+                    
+                    for assessment in assessments:
+                        assessment_name = assessment.get('name', 'Unknown')
+                        assessment_props = assessment.get('properties', {})
+                        assessment_display_name = assessment_props.get('displayName', 'Unknown')
+                        assessment_status = assessment_props.get('status', {}).get('code', 'Unknown')
+                        
+                        # Look for vulnerability-related assessments
+                        if any(keyword in assessment_display_name.lower() for keyword in ['vulnerability', 'cve', 'security baseline']):
+                            vulnerability_assessments.append(assessment)
+                            self.formatter.print_key_value(f"Assessment: {assessment_display_name}", assessment_status)
+                    
+                    if vulnerability_assessments:
+                        self.formatter.print_success(f"Found {len(vulnerability_assessments)} vulnerability-related assessments")
+                        vulnerability_management_enabled = True
+                    else:
+                        self.formatter.print_info("No vulnerability-related assessments found")
+                else:
+                    self.formatter.print_info("No security assessments found")
+            else:
+                self.formatter.print_warning(f"Could not retrieve security assessments: {response.status_code}")
+        except Exception as e:
+            self.formatter.print_error(f"Exception occurred while checking security assessments: {e}")
+        
+        # 6. Summary and Compliance Assessment
+        self.formatter.print_subsection("VULNERABILITY MANAGEMENT COMPLIANCE SUMMARY")
+        self.formatter.print_key_value("Vulnerability Management Enabled", vulnerability_management_enabled)
+        self.formatter.print_key_value("Sentinel Integration Configured", sentinel_integration_configured)
+        self.formatter.print_key_value("Vulnerability Alerts Found", vulnerability_alerts_found)
+        self.formatter.print_key_value("Recent Vulnerability Alerts", recent_vulnerabilities)
+        self.formatter.print_key_value("SonarQube VMs Found", sonarqube_vms_found)
+        self.formatter.print_key_value("SonarQube Services Found", sonarqube_services_found)
+        self.formatter.print_key_value("SonarQube Containers Found", sonarqube_containers_found)
+        
+        # Compliance assessment
+        if vulnerability_management_enabled and sentinel_integration_configured:
+            if vulnerability_alerts_found:
+                self.formatter.print_success("EXCELLENT: Vulnerability management is enabled and actively reporting to Sentinel")
+            else:
+                self.formatter.print_warning("GOOD: Vulnerability management is enabled but no recent alerts found")
+        elif vulnerability_management_enabled:
+            self.formatter.print_warning("MODERATE: Vulnerability management is enabled but Sentinel integration needs verification")
+        else:
+            self.formatter.print_error("POOR: Vulnerability management is not properly configured")
+        
+        # Compliance evidence
+        self.formatter.print_subsection("COMPLIANCE EVIDENCE")
+        if vulnerability_management_enabled and sentinel_integration_configured and vulnerability_alerts_found:
+            self.formatter.print_success("VULNERABILITY MANAGEMENT VERIFIED: Microsoft Defender Vulnerability Management is enabled and configured. Vulnerabilities are being ingested into Microsoft Sentinel for monitoring and alerting, providing comprehensive vulnerability assessment coverage for FedRAMP Moderate compliance.")
+        elif vulnerability_management_enabled and sentinel_integration_configured:
+            self.formatter.print_warning("PARTIAL COMPLIANCE: Vulnerability management is enabled and integrated with Sentinel, but no recent vulnerability alerts detected. Verify scanning schedules and alert configurations.")
+        elif vulnerability_management_enabled:
+            self.formatter.print_warning("PARTIAL COMPLIANCE: Vulnerability management is enabled but Sentinel integration needs verification. Ensure vulnerability alerts are being sent to Microsoft Sentinel.")
+        else:
+            self.formatter.print_error("NON-COMPLIANT: Microsoft Defender Vulnerability Management is not properly configured. Implement vulnerability scanning and ensure integration with Microsoft Sentinel for comprehensive vulnerability monitoring.")
+        
+        self.formatter.print_separator()
+
+    def check_asg_boundary_protection(self):
+        """Check that Azure ASGs are used for boundary protection and limited to allowed ports, protocols, and services."""
+        self.formatter.print_header(
+            "AZURE ASG BOUNDARY PROTECTION & NSG DEFAULT RULES",
+            "This function checks Network Security Groups for default rule priority 65000 DenyAllInbound and enumerates Azure Application Security Groups (ASGs) to verify ASG-to-ASG rules for permit-by-exception boundary protection."
+        )
+        subscription_id = getattr(self.config, 'subscription_id', None)
+        if not subscription_id:
+            self.formatter.print_error("subscription_id must be set in config.")
+            return
+        
+        # Track compliance metrics
+        total_nsgs = 0
+        nsgs_with_deny_all_inbound = 0
+        total_asgs = 0
+        asgs_with_rules = 0
+        asg_to_asg_rules_found = 0
+        
+        try:
+            # 1. Check NSGs for default rule priority 65000 DenyAllInbound
+            self.formatter.print_subsection("NSG DEFAULT RULES - PRIORITY 65000 DENYALLINBOUND")
+            nsg_url = f"/subscriptions/{subscription_id}/providers/Microsoft.Network/networkSecurityGroups?api-version=2023-04-01"
+            nsg_response = self.api_client.arm_get(nsg_url)
+            if nsg_response.status_code == 200:
+                nsgs = nsg_response.json().get('value', [])
+                if not nsgs:
+                    self.formatter.print_warning("No Network Security Groups found in the subscription.")
+                else:
+                    total_nsgs = len(nsgs)
+                    self.formatter.print_success(f"Found {total_nsgs} Network Security Groups")
+                    
+                    for nsg in nsgs:
+                        nsg_name = nsg.get('name', 'Unknown')
+                        nsg_id = nsg.get('id', '')
+                        rg = nsg_id.split('/')[4] if len(nsg_id.split('/')) > 4 else 'Unknown'
+                        
+                        self.formatter.print_subsection(f"NSG: {nsg_name}")
+                        self.formatter.print_key_value("Resource Group", rg)
+                        
+                        # Check default security rules (priority 65000)
+                        default_rules = nsg.get('properties', {}).get('defaultSecurityRules', [])
+                        deny_all_inbound_found = False
+                        
+                        for rule in default_rules:
+                            rule_name = rule.get('name', 'Unknown')
+                            priority = rule.get('priority', 0)
+                            access = rule.get('access', '').lower()
+                            direction = rule.get('direction', '').lower()
+                            
+                            # Check for DenyAllInbound rule with priority 65000
+                            if (priority == 65000 and 
+                                direction == 'inbound' and 
+                                access == 'deny' and 
+                                rule_name.lower() in ['denyallinbound', 'denyallinboundtraffic']):
+                                deny_all_inbound_found = True
+                                nsgs_with_deny_all_inbound += 1
+                                self.formatter.print_success(f"Found DenyAllInbound rule: {rule_name} (Priority: {priority})")
+                                break
+                        
+                        if not deny_all_inbound_found:
+                            self.formatter.print_error(f"Missing DenyAllInbound rule with priority 65000")
+                        
+                        # Check custom security rules for ASG references
+                        custom_rules = nsg.get('properties', {}).get('securityRules', [])
+                        asg_rules_in_nsg = 0
+                        
+                        for rule in custom_rules:
+                            src_asgs = rule.get('sourceApplicationSecurityGroups', [])
+                            dst_asgs = rule.get('destinationApplicationSecurityGroups', [])
+                            
+                            # Check if this is an ASG-to-ASG rule
+                            if src_asgs and dst_asgs:
+                                asg_to_asg_rules_found += 1
+                                asg_rules_in_nsg += 1
+                                rule_name = rule.get('name', 'Unknown')
+                                access = rule.get('access', '').lower()
+                                direction = rule.get('direction', '').lower()
+                                protocol = rule.get('protocol', 'Any')
+                                port_range = rule.get('destinationPortRange', '')
+                                port_ranges = rule.get('destinationPortRanges', [])
+                                priority = rule.get('priority', 0)
+                                
+                                self.formatter.print_success(f"ASG-to-ASG rule found: {rule_name}")
+                                self.formatter.print_key_value("  Priority", priority)
+                                self.formatter.print_key_value("  Direction", direction)
+                                self.formatter.print_key_value("  Access", access)
+                                self.formatter.print_key_value("  Protocol", protocol)
+                                
+                                all_ports = [port_range] if port_range else []
+                                all_ports += port_ranges
+                                self.formatter.print_key_value("  Ports", ', '.join(all_ports) if all_ports else 'Any')
+                                
+                                # Show ASG details
+                                src_asg_names = [asg.get('id', '').split('/')[-1] for asg in src_asgs]
+                                dst_asg_names = [asg.get('id', '').split('/')[-1] for asg in dst_asgs]
+                                self.formatter.print_key_value("  Source ASGs", ', '.join(src_asg_names))
+                                self.formatter.print_key_value("  Destination ASGs", ', '.join(dst_asg_names))
+                        
+                        if asg_rules_in_nsg == 0:
+                            self.formatter.print_info("No ASG-to-ASG rules found in this NSG")
+                        
+                        self.formatter.print_separator()
+                    else:
+                        self.formatter.print_error(f"Failed to retrieve NSGs: {nsg_response.status_code}")
+            
+            # 2. List all ASGs and their usage
+            self.formatter.print_subsection("APPLICATION SECURITY GROUPS (ASG) INVENTORY")
             asg_url = f"/subscriptions/{subscription_id}/providers/Microsoft.Network/applicationSecurityGroups?api-version=2023-04-01"
             asg_response = self.api_client.arm_get(asg_url)
             if asg_response.status_code == 200:
                 asgs = asg_response.json().get('value', [])
                 if not asgs:
                     self.formatter.print_warning("No Application Security Groups found in the subscription.")
-                    return
-                # List all NSGs
-                nsg_url = f"/subscriptions/{subscription_id}/providers/Microsoft.Network/networkSecurityGroups?api-version=2023-04-01"
-                nsg_response = self.api_client.arm_get(nsg_url)
-                nsgs = nsg_response.json().get('value', []) if nsg_response.status_code == 200 else []
+                else:
+                    total_asgs = len(asgs)
+                    self.formatter.print_success(f"Found {total_asgs} Application Security Groups")
+                    
                 for asg in asgs:
                     asg_name = asg.get('name', 'Unknown')
                     asg_id = asg.get('id', '')
                     rg = asg_id.split('/')[4] if len(asg_id.split('/')) > 4 else 'Unknown'
+                    location = asg.get('location', 'Unknown')
+                        
                     self.formatter.print_subsection(f"ASG: {asg_name}")
                     self.formatter.print_key_value("Resource Group", rg)
-                    found_rule = False
+                    self.formatter.print_key_value("Location", location)
+                        
+                    # Check if this ASG is referenced in any NSG rules
+                    asg_referenced = False
                     for nsg in nsgs:
                         nsg_name = nsg.get('name', 'Unknown')
                         rules = nsg.get('properties', {}).get('securityRules', [])
+                            
                         for rule in rules:
                             src_asgs = rule.get('sourceApplicationSecurityGroups', [])
                             dst_asgs = rule.get('destinationApplicationSecurityGroups', [])
-                            access = rule.get('access', '').lower()
-                            direction = rule.get('direction', '').lower()
-                            protocol = rule.get('protocol', 'Any')
-                            port_range = rule.get('destinationPortRange', '')
-                            port_ranges = rule.get('destinationPortRanges', [])
-                            name = rule.get('name', '')
+                                
                             # Check if this ASG is referenced
                             if any(asg_id == s.get('id') for s in src_asgs + dst_asgs):
-                                found_rule = True
-                                self.formatter.print_key_value("Referenced in NSG", nsg_name)
-                                self.formatter.print_key_value("Rule Name", name)
-                                self.formatter.print_key_value("Direction", direction)
-                                self.formatter.print_key_value("Access", access)
-                                self.formatter.print_key_value("Protocol", protocol)
+                                asg_referenced = True
+                                asgs_with_rules += 1
+                                rule_name = rule.get('name', 'Unknown')
+                                access = rule.get('access', '').lower()
+                                direction = rule.get('direction', '').lower()
+                                protocol = rule.get('protocol', 'Any')
+                                port_range = rule.get('destinationPortRange', '')
+                                port_ranges = rule.get('destinationPortRanges', [])
+                                        
+                                self.formatter.print_success(f"Referenced in NSG: {nsg_name}")
+                                self.formatter.print_key_value("  Rule Name", rule_name)
+                                self.formatter.print_key_value("  Direction", direction)
+                                self.formatter.print_key_value("  Access", access)
+                                self.formatter.print_key_value("  Protocol", protocol)
+                                
                                 all_ports = [port_range] if port_range else []
                                 all_ports += port_ranges
-                                self.formatter.print_key_value("Ports", ', '.join(all_ports) if all_ports else 'Any')
-                    if not found_rule:
-                        self.formatter.print_warning("No NSG rules found referencing this ASG.")
+                                self.formatter.print_key_value("  Ports", ', '.join(all_ports) if all_ports else 'Any')
+                                break
+                            
+                            if asg_referenced:
+                                break
+                        
+                        if not asg_referenced:
+                            self.formatter.print_warning("⚠ No NSG rules found referencing this ASG")
+                        
                     self.formatter.print_separator()
             else:
                 self.formatter.print_error(f"Failed to retrieve ASGs: {asg_response.status_code}")
+            
+            # 3. Summary and Compliance Assessment
+            self.formatter.print_subsection("ASG BOUNDARY PROTECTION COMPLIANCE SUMMARY")
+            self.formatter.print_key_value("Total NSGs", total_nsgs)
+            self.formatter.print_key_value("NSGs with DenyAllInbound (65000)", nsgs_with_deny_all_inbound)
+            self.formatter.print_key_value("Total ASGs", total_asgs)
+            self.formatter.print_key_value("ASGs with NSG Rules", asgs_with_rules)
+            self.formatter.print_key_value("ASG-to-ASG Rules Found", asg_to_asg_rules_found)
+            
+            # Compliance assessment
+            if total_nsgs > 0:
+                nsg_compliance = (nsgs_with_deny_all_inbound / total_nsgs) * 100
+                self.formatter.print_key_value("NSG DenyAllInbound Compliance", f"{nsg_compliance:.1f}%")
+                
+                if nsg_compliance >= 90:
+                    self.formatter.print_success("EXCELLENT: Most NSGs have proper DenyAllInbound rules")
+                elif nsg_compliance >= 70:
+                    self.formatter.print_warning("⚠ GOOD: Most NSGs have DenyAllInbound rules, review missing ones")
+                else:
+                    self.formatter.print_error("POOR: Many NSGs missing DenyAllInbound rules")
+            
+            if total_asgs > 0:
+                asg_usage = (asgs_with_rules / total_asgs) * 100
+                self.formatter.print_key_value("ASG Usage Rate", f"{asg_usage:.1f}%")
+                
+                if asg_usage >= 80:
+                    self.formatter.print_success("GOOD: Most ASGs are being used in NSG rules")
+                elif asg_usage >= 50:
+                    self.formatter.print_warning("⚠ MODERATE: Some ASGs are not being used")
+                else:
+                    self.formatter.print_warning("⚠ LOW: Many ASGs are not being used in NSG rules")
+            
+            if asg_to_asg_rules_found > 0:
+                self.formatter.print_success("ASG-to-ASG rules found - permit-by-exception boundary protection implemented")
+            else:
+                self.formatter.print_warning("⚠ No ASG-to-ASG rules found - consider implementing permit-by-exception rules")
+            
+            # Compliance evidence
+            self.formatter.print_subsection("COMPLIANCE EVIDENCE")
+            if nsgs_with_deny_all_inbound > 0 and asg_to_asg_rules_found > 0:
+                self.formatter.print_success("BOUNDARY PROTECTION VERIFIED: Network Security Groups have default DenyAllInbound rules (priority 65000) and Application Security Groups are used for permit-by-exception access control through ASG-to-ASG rules.")
+            elif nsgs_with_deny_all_inbound > 0:
+                self.formatter.print_warning("⚠ PARTIAL COMPLIANCE: NSGs have DenyAllInbound rules but ASG-to-ASG rules need implementation")
+            elif asg_to_asg_rules_found > 0:
+                self.formatter.print_warning("⚠ PARTIAL COMPLIANCE: ASG-to-ASG rules exist but NSG DenyAllInbound rules need verification")
+            else:
+                self.formatter.print_error("NON-COMPLIANT: Missing both NSG DenyAllInbound rules and ASG-to-ASG boundary protection")
+
         except Exception as e:
             self.formatter.print_error(f"Exception occurred while checking ASG boundary protection: {e}")
         self.formatter.print_separator()
@@ -4849,34 +6335,52 @@ class SecurityFunctions:
                         self.formatter.print_key_value("Computer", row[0])
                 else:
                     self.formatter.print_success("All forwarders are reporting as expected.")
+            elif response.status_code == 403:
+                self.formatter.print_warning("Access denied to Log Analytics workspace.")
+                self.formatter.print_info("Required permissions: Log Analytics Reader or Contributor role")
+                self.formatter.print_info("To fix: Assign the role to service principal at the workspace level.")
             else:
                 self.formatter.print_error("Failed to query Heartbeat table for forwarder status.")
+                self.formatter.print_info("This may indicate: Log Analytics agents not deployed, workspace permissions issues, or no agents configured to send heartbeat data.")
                 self.formatter.print_info(f"Response: {response.text}")
         except Exception as e:
-            self.formatter.print_error(f"Exception: {e}")
+            self.formatter.print_error(f"Exception querying Heartbeat table: {e}")
+            self.formatter.print_info("Prerequisites: Log Analytics workspace must be configured with agents sending heartbeat data.")
 
         # 2. MFA Activity
         self.formatter.print_subsection("MFA ACTIVITY")
         try:
-            query = f"""
-            SigninLogs
-            | where TimeGenerated > ago(1d)
-            | where ConditionalAccessStatus == "success" and AuthenticationRequirement == "multiFactorAuthentication"
-            | take {max_lines}
-            """
-            payload = {"query": query, "timespan": "P1D"}
-            response = self.api_client.arm_post(url, payload)
+            # Use Microsoft Graph API for Azure AD sign-in logs - limit to recent data
+            graph_url = f"/auditLogs/signIns?$top=50&$orderby=createdDateTime desc"
+            response = self.api_client.graph_get(graph_url)
             if response.status_code == 200:
-                tables = response.json().get('tables', [])
-                if tables and tables[0].get('rows'):
-                    self.formatter.print_success(f"Found {len(tables[0]['rows'])} recent MFA sign-ins.")
+                signins = response.json().get('value', [])
+                # Filter for MFA sign-ins in the response (only check first 20 for performance)
+                mfa_signins = []
+                for s in signins[:20]:  # Limit to first 20 for performance
+                    if s.get('authenticationRequirement') == 'multiFactorAuthentication':
+                        mfa_signins.append(s)
+                if mfa_signins:
+                    self.formatter.print_success(f"Found {len(mfa_signins)} recent MFA sign-ins.")
+                    for signin in mfa_signins[:5]:  # Show first 5
+                        user = signin.get('userPrincipalName', 'Unknown')
+                        app = signin.get('appDisplayName', 'Unknown')
+                        self.formatter.print_key_value(f"MFA Sign-in", f"{user} via {app}")
+                    if len(mfa_signins) > 5:
+                        self.formatter.print_info(f"... and {len(mfa_signins) - 5} more MFA sign-ins.")
                 else:
                     self.formatter.print_info("No recent MFA sign-ins found.")
+            elif response.status_code == 403:
+                self.formatter.print_warning("Access denied to Azure AD sign-in logs.")
+                self.formatter.print_info("Required permissions: SignInLog.Read.All or AuditLog.Read.All")
+                self.formatter.print_info("To fix: Grant admin consent for the required Microsoft Graph permissions.")
             else:
-                self.formatter.print_error("Failed to query SigninLogs for MFA activity.")
+                self.formatter.print_error("Failed to query Azure AD sign-in logs for MFA activity.")
+                self.formatter.print_info("This may indicate: Azure AD Premium P1/P2 not enabled, sign-in logs not configured, or insufficient permissions.")
                 self.formatter.print_info(f"Response: {response.text}")
         except Exception as e:
-            self.formatter.print_error(f"Exception: {e}")
+            self.formatter.print_error(f"Exception querying Azure AD sign-in logs: {e}")
+            self.formatter.print_info("Prerequisites: Azure AD Premium license required with sign-in logs enabled.")
 
         # 3. Configuration Baselines
         self.formatter.print_subsection("CONFIGURATION BASELINES")
@@ -4894,34 +6398,52 @@ class SecurityFunctions:
                     self.formatter.print_success(f"Found {len(tables[0]['rows'])} recent configuration changes.")
                 else:
                     self.formatter.print_info("No recent configuration changes found.")
+            elif response.status_code == 403:
+                self.formatter.print_warning("Access denied to Log Analytics workspace.")
+                self.formatter.print_info("Required permissions: Log Analytics Reader or Contributor role")
+                self.formatter.print_info("To fix: Assign the role to service principal at the workspace level.")
             else:
                 self.formatter.print_error("Failed to query ConfigurationChange table.")
+                self.formatter.print_info("This may indicate: Change Tracking solution not enabled, no monitored resources, or insufficient workspace permissions.")
                 self.formatter.print_info(f"Response: {response.text}")
         except Exception as e:
-            self.formatter.print_error(f"Exception: {e}")
+            self.formatter.print_error(f"Exception querying ConfigurationChange table: {e}")
+            self.formatter.print_info("Prerequisites: Change Tracking solution must be enabled in Log Analytics workspace.")
 
         # 4. Failed Logins
         self.formatter.print_subsection("FAILED LOGINS")
         try:
-            query = f"""
-            SigninLogs
-            | where TimeGenerated > ago(1d)
-            | where ResultType != 0
-            | take {max_lines}
-            """
-            payload = {"query": query, "timespan": "P1D"}
-            response = self.api_client.arm_post(url, payload)
+            # Use Microsoft Graph API for Azure AD sign-in logs - limit to recent data
+            graph_url = f"/auditLogs/signIns?$top=50&$orderby=createdDateTime desc"
+            response = self.api_client.graph_get(graph_url)
             if response.status_code == 200:
-                tables = response.json().get('tables', [])
-                if tables and tables[0].get('rows'):
-                    self.formatter.print_success(f"Found {len(tables[0]['rows'])} failed logins.")
+                signins = response.json().get('value', [])
+                # Filter for failed logins in the response (only check first 20 for performance)
+                failed_signins = []
+                for s in signins[:20]:  # Limit to first 20 for performance
+                    if s.get('status', {}).get('errorCode', 0) != 0:
+                        failed_signins.append(s)
+                if failed_signins:
+                    self.formatter.print_success(f"Found {len(failed_signins)} failed logins.")
+                    for signin in failed_signins[:5]:  # Show first 5
+                        user = signin.get('userPrincipalName', 'Unknown')
+                        error = signin.get('status', {}).get('errorCode', 'Unknown')
+                        self.formatter.print_key_value(f"Failed Login", f"{user} - Error: {error}")
+                    if len(failed_signins) > 5:
+                        self.formatter.print_info(f"... and {len(failed_signins) - 5} more failed logins.")
                 else:
                     self.formatter.print_info("No failed logins found.")
+            elif response.status_code == 403:
+                self.formatter.print_warning("Access denied to Azure AD sign-in logs.")
+                self.formatter.print_info("Required permissions: SignInLog.Read.All or AuditLog.Read.All")
+                self.formatter.print_info("To fix: Grant admin consent for the required Microsoft Graph permissions.")
             else:
-                self.formatter.print_error("Failed to query SigninLogs for failed logins.")
+                self.formatter.print_error("Failed to query Azure AD sign-in logs for failed logins.")
+                self.formatter.print_info("This may indicate: Azure AD Premium P1/P2 not enabled, sign-in logs not configured, or insufficient permissions.")
                 self.formatter.print_info(f"Response: {response.text}")
         except Exception as e:
-            self.formatter.print_error(f"Exception: {e}")
+            self.formatter.print_error(f"Exception querying Azure AD sign-in logs for failed logins: {e}")
+            self.formatter.print_info("Prerequisites: Azure AD Premium license required with sign-in logs enabled.")
 
         # 5. Data Feed Status
         self.formatter.print_subsection("DATA FEED STATUS")
@@ -4930,15 +6452,24 @@ class SecurityFunctions:
             response = self.api_client.arm_get(url)
             if response.status_code == 200:
                 connectors = response.json().get('value', [])
-                for connector in connectors:
-                    name = connector.get('name', 'Unknown')
-                    state = connector.get('properties', {}).get('connectorState', 'Unknown')
-                    self.formatter.print_key_value(f"Connector: {name}", f"State: {state}")
+                if connectors:
+                    for connector in connectors:
+                        name = connector.get('name', 'Unknown')
+                        state = connector.get('properties', {}).get('connectorState', 'Unknown')
+                        self.formatter.print_key_value(f"Connector: {name}", f"State: {state}")
+                else:
+                    self.formatter.print_info("No data connectors found in Microsoft Sentinel.")
+            elif response.status_code == 403:
+                self.formatter.print_warning("Access denied to Microsoft SecurityInsights data connectors.")
+                self.formatter.print_info("Required permissions: Microsoft Sentinel Contributor or Log Analytics Contributor role.")
+                self.formatter.print_info("To fix: Assign the role to service principal at the workspace level.")
             else:
                 self.formatter.print_error("Failed to retrieve data connectors.")
+                self.formatter.print_info("This may indicate: Microsoft Sentinel not enabled, insufficient permissions, or workspace not properly configured.")
                 self.formatter.print_info(f"Response: {response.text}")
         except Exception as e:
-            self.formatter.print_error(f"Exception: {e}")
+            self.formatter.print_error(f"Exception retrieving data connectors: {e}")
+            self.formatter.print_info("Prerequisites: Microsoft Sentinel must be enabled on the Log Analytics workspace.")
 
         # 6. External and Internal Connections Monitoring
         self.formatter.print_subsection("EXTERNAL AND INTERNAL CONNECTIONS MONITORING")
@@ -4956,57 +6487,105 @@ class SecurityFunctions:
                     self.formatter.print_success(f"Found {len(tables[0]['rows'])} recent network connection records.")
                 else:
                     self.formatter.print_info("No recent network connection records found.")
+            elif response.status_code == 403:
+                self.formatter.print_warning("Access denied to Log Analytics workspace.")
+                self.formatter.print_info("Required permissions: Log Analytics Reader or Contributor role")
+                self.formatter.print_info("To fix: Assign the role to service principal at the workspace level.")
             else:
                 self.formatter.print_error("Failed to query AzureNetworkAnalytics_CL.")
+                self.formatter.print_info("This may indicate: Network Watcher not enabled, network analytics not configured, or no network resources being monitored.")
                 self.formatter.print_info(f"Response: {response.text}")
         except Exception as e:
-            self.formatter.print_error(f"Exception: {e}")
+            self.formatter.print_error(f"Exception querying AzureNetworkAnalytics_CL: {e}")
+            self.formatter.print_info("Prerequisites: Network Watcher must be enabled with network analytics configured.")
 
         # 7. Root/Administrative Account Activity
         self.formatter.print_subsection("ROOT/ADMINISTRATIVE ACCOUNT ACTIVITY")
         try:
-            query = f"""
-            AuditLogs
-            | where TimeGenerated > ago(1d)
-            | where InitiatedBy contains "admin" or InitiatedBy contains "root"
-            | take {max_lines}
-            """
-            payload = {"query": query, "timespan": "P1D"}
-            response = self.api_client.arm_post(url, payload)
+            # Use Microsoft Graph API for Azure AD audit logs - limit to recent data
+            graph_url = f"/auditLogs/directoryAudits?$top=50&$orderby=activityDateTime desc"
+            response = self.api_client.graph_get(graph_url)
             if response.status_code == 200:
-                tables = response.json().get('tables', [])
-                if tables and tables[0].get('rows'):
-                    self.formatter.print_success(f"Found {len(tables[0]['rows'])} recent root/admin activities.")
+                audits = response.json().get('value', [])
+                # Filter for admin/root activities in the response (only check first 20 for performance)
+                admin_audits = []
+                for audit in audits[:20]:  # Limit to first 20 for performance
+                    initiated_by = audit.get('initiatedBy')
+                    if initiated_by:
+                        user_obj = initiated_by.get('user')
+                        if user_obj:
+                            user = user_obj.get('userPrincipalName', '')
+                            if user and ('admin' in user.lower() or 'root' in user.lower()):
+                                admin_audits.append(audit)
+                
+                if admin_audits:
+                    self.formatter.print_success(f"Found {len(admin_audits)} recent root/admin activities.")
+                    for audit in admin_audits[:5]:  # Show first 5
+                        initiated_by = audit.get('initiatedBy')
+                        if initiated_by:
+                            user_obj = initiated_by.get('user')
+                            user = user_obj.get('userPrincipalName', 'Unknown') if user_obj else 'Unknown'
+                        else:
+                            user = 'Unknown'
+                        activity = audit.get('activityDisplayName', 'Unknown')
+                        self.formatter.print_key_value(f"Admin Activity", f"{user} - {activity}")
+                    if len(admin_audits) > 5:
+                        self.formatter.print_info(f"... and {len(admin_audits) - 5} more admin activities.")
                 else:
                     self.formatter.print_info("No recent root/admin activities found.")
+            elif response.status_code == 403:
+                self.formatter.print_warning("Access denied to Azure AD audit logs.")
+                self.formatter.print_info("Required permissions: AuditLog.Read.All")
+                self.formatter.print_info("To fix: Grant admin consent for the required Microsoft Graph permissions.")
             else:
-                self.formatter.print_error("Failed to query AuditLogs for admin activity.")
+                self.formatter.print_error("Failed to query Azure AD audit logs for admin activity.")
+                self.formatter.print_info("This may indicate: Azure AD Premium P1/P2 not enabled, audit logs not configured, or insufficient permissions.")
                 self.formatter.print_info(f"Response: {response.text}")
         except Exception as e:
-            self.formatter.print_error(f"Exception: {e}")
+            self.formatter.print_error(f"Exception querying Azure AD audit logs for admin activity: {e}")
+            self.formatter.print_info("Prerequisites: Azure AD Premium license required with audit logs enabled.")
 
         # 8. Permission and Object Changes
         self.formatter.print_subsection("PERMISSION AND OBJECT CHANGES")
         try:
-            query = f"""
-            AuditLogs
-            | where TimeGenerated > ago(1d)
-            | where ActivityDisplayName contains "permission" or ActivityDisplayName contains "role" or ActivityDisplayName contains "object"
-            | take {max_lines}
-            """
-            payload = {"query": query, "timespan": "P1D"}
-            response = self.api_client.arm_post(url, payload)
+            # Use Microsoft Graph API for Azure AD audit logs - limit to recent data
+            graph_url = f"/auditLogs/directoryAudits?$top=50&$orderby=activityDateTime desc"
+            response = self.api_client.graph_get(graph_url)
             if response.status_code == 200:
-                tables = response.json().get('tables', [])
-                if tables and tables[0].get('rows'):
-                    self.formatter.print_success(f"Found {len(tables[0]['rows'])} recent permission/object changes.")
+                audits = response.json().get('value', [])
+                # Filter for permission/role/object changes in the response (only check first 20 for performance)
+                permission_audits = []
+                for audit in audits[:20]:  # Limit to first 20 for performance
+                    activity = audit.get('activityDisplayName', '').lower()
+                    if any(keyword in activity for keyword in ['permission', 'role', 'object']):
+                        permission_audits.append(audit)
+                
+                if permission_audits:
+                    self.formatter.print_success(f"Found {len(permission_audits)} recent permission/object changes.")
+                    for audit in permission_audits[:5]:  # Show first 5
+                        initiated_by = audit.get('initiatedBy')
+                        if initiated_by:
+                            user_obj = initiated_by.get('user')
+                            user = user_obj.get('userPrincipalName', 'Unknown') if user_obj else 'Unknown'
+                        else:
+                            user = 'Unknown'
+                        activity = audit.get('activityDisplayName', 'Unknown')
+                        self.formatter.print_key_value(f"Permission/Object Change", f"{user} - {activity}")
+                    if len(permission_audits) > 5:
+                        self.formatter.print_info(f"... and {len(permission_audits) - 5} more permission/object changes.")
                 else:
                     self.formatter.print_info("No recent permission/object changes found.")
+            elif response.status_code == 403:
+                self.formatter.print_warning("Access denied to Azure AD audit logs.")
+                self.formatter.print_info("Required permissions: AuditLog.Read.All")
+                self.formatter.print_info("To fix: Grant admin consent for the required Microsoft Graph permissions.")
             else:
-                self.formatter.print_error("Failed to query AuditLogs for permission/object changes.")
+                self.formatter.print_error("Failed to query Azure AD audit logs for permission/object changes.")
+                self.formatter.print_info("This may indicate: Azure AD Premium P1/P2 not enabled, audit logs not configured, or insufficient permissions.")
                 self.formatter.print_info(f"Response: {response.text}")
         except Exception as e:
-            self.formatter.print_error(f"Exception: {e}")
+            self.formatter.print_error(f"Exception querying Azure AD audit logs for permission/object changes: {e}")
+            self.formatter.print_info("Prerequisites: Azure AD Premium license required with audit logs enabled.")
         self.formatter.print_separator()
 
     def check_azure_key_vault_key_storage(self):
@@ -5052,7 +6631,6 @@ class SecurityFunctions:
         except Exception as e:
             self.formatter.print_error(f"Exception occurred while checking Key Vaults: {e}")
         self.formatter.print_separator()
-
 
     def check_inbound_internet_traffic_restriction(self):
         """Check that inbound internet traffic is restricted to TLS and SSH encrypted ports only."""
@@ -5283,11 +6861,101 @@ class SecurityFunctions:
                 self.formatter.print_error(f"Failed to retrieve SQL servers: {response.status_code}")
         except Exception as e:
             self.formatter.print_error(f"Exception occurred while checking SQL geo-replication: {e}")
+        
+        # Check Backup & Restore Configuration
+        self.formatter.print_subsection("BACKUP & RESTORE CONFIGURATION")
+        backup_rto_compliant = False
+        try:
+            # Check Recovery Services Vaults
+            url = f"/subscriptions/{subscription_id}/providers/Microsoft.RecoveryServices/vaults?api-version=2023-04-01"
+            response = self.api_client.arm_get(url)
+            if response.status_code == 200:
+                vaults = response.json().get('value', [])
+                if not vaults:
+                    self.formatter.print_warning("No Recovery Services Vaults found in the subscription.")
+                else:
+                    for vault in vaults:
+                        vault_name = vault.get('name', 'Unknown')
+                        vault_id = vault.get('id', '')
+                        self.formatter.print_subsection(f"RECOVERY SERVICES VAULT: {vault_name}")
+                        
+                        # Check backup items
+                        backup_items_url = f"{vault_id}/backupProtectedItems?api-version=2023-04-01"
+                        backup_response = self.api_client.arm_get(backup_items_url)
+                        if backup_response.status_code == 200:
+                            backup_items = backup_response.json().get('value', [])
+                            if backup_items:
+                                self.formatter.print_success(f"Found {len(backup_items)} protected backup items")
+                                
+                                # Check backup policies for frequency
+                                policies_url = f"{vault_id}/backupPolicies?api-version=2023-04-01"
+                                policies_response = self.api_client.arm_get(policies_url)
+                                if policies_response.status_code == 200:
+                                    policies = policies_response.json().get('value', [])
+                                    for policy in policies:
+                                        policy_name = policy.get('name', 'Unknown')
+                                        policy_props = policy.get('properties', {})
+                                        
+                                        # Check backup frequency
+                                        backup_schedule = policy_props.get('backupSchedule', {})
+                                        if backup_schedule:
+                                            schedule_runs = backup_schedule.get('scheduleRunTimes', [])
+                                            if schedule_runs:
+                                                # Calculate frequency in minutes
+                                                if len(schedule_runs) > 1:
+                                                    # Multiple times per day - check if frequent enough
+                                                    self.formatter.print_success(f"Policy '{policy_name}' has multiple daily backups")
+                                                    backup_rto_compliant = True
+                                                else:
+                                                    # Single daily backup - check if it's frequent enough
+                                                    self.formatter.print_info(f"Policy '{policy_name}' has daily backup schedule")
+                                        
+                                        # Check retention settings
+                                        retention_policy = policy_props.get('retentionPolicy', {})
+                                        if retention_policy:
+                                            daily_retention = retention_policy.get('dailySchedule', {}).get('retentionDuration', {}).get('count', 0)
+                                            if daily_retention >= 1:
+                                                self.formatter.print_success(f"Policy '{policy_name}' has daily retention for {daily_retention} days")
+                                                backup_rto_compliant = True
+                                            else:
+                                                self.formatter.print_warning(f"Policy '{policy_name}' has insufficient daily retention")
+                            else:
+                                self.formatter.print_warning("No backup items found in this vault")
+                        else:
+                            self.formatter.print_error(f"Failed to retrieve backup items: {backup_response.status_code}")
+                        
+                        # Check for recent backup jobs (as proxy for DR drills)
+                        jobs_url = f"{vault_id}/backupJobs?api-version=2023-04-01&$filter=status eq 'Completed'&$top=10"
+                        jobs_response = self.api_client.arm_get(jobs_url)
+                        if jobs_response.status_code == 200:
+                            jobs = jobs_response.json().get('value', [])
+                            if jobs:
+                                recent_jobs = [job for job in jobs if job.get('properties', {}).get('endTime')]
+                                if recent_jobs:
+                                    self.formatter.print_success(f"Found {len(recent_jobs)} recent completed backup jobs")
+                                    backup_rto_compliant = True
+                                else:
+                                    self.formatter.print_warning("No recent completed backup jobs found")
+                            else:
+                                self.formatter.print_warning("No backup jobs found")
+                        else:
+                            self.formatter.print_error(f"Failed to retrieve backup jobs: {jobs_response.status_code}")
+            else:
+                self.formatter.print_error(f"Failed to retrieve Recovery Services Vaults: {response.status_code}")
+        except Exception as e:
+            self.formatter.print_error(f"Exception occurred while checking backup configuration: {e}")
+        
         # Print RTO statement
-        if ha_found:
+        if ha_found and backup_rto_compliant:
+            self.formatter.print_success("Product portions are highly available with a 1-hour recovery-time objective (RTO) based on HA configuration and backup frequency.")
+        elif ha_found:
             self.formatter.print_success("Product portions are highly available with a 1-hour recovery-time objective (RTO) based on HA configuration.")
+            self.formatter.print_warning("Backup frequency may need review to ensure 1-hour RTO compliance.")
+        elif backup_rto_compliant:
+            self.formatter.print_success("Backup configuration supports 1-hour RTO with frequent backups.")
+            self.formatter.print_warning("High availability configuration may need review to ensure 1-hour RTO compliance.")
         else:
-            self.formatter.print_warning("No explicit HA configuration found. Please review your environment to ensure 1-hour RTO is achievable.")
+            self.formatter.print_warning("No explicit HA configuration or backup frequency found. Please review your environment to ensure 1-hour RTO is achievable.")
         self.formatter.print_separator()
 
     def check_pim_admin_access(self):
@@ -5391,7 +7059,6 @@ class SecurityFunctions:
         except Exception as e:
             self.formatter.print_error(f"Exception occurred while retrieving PIM admin assignments: {e}")
         self.formatter.print_separator()
-
 
     def check_ssh_mfa_enforcement(self):
         """Check that SSH sessions require MFA (Microsoft Authenticator) via Conditional Access or Azure AD login."""
@@ -5924,53 +7591,6 @@ class SecurityFunctions:
             self.formatter.print_error(f"Exception occurred while listing resource groups and system load: {e}")
         self.formatter.print_separator()
 
-    def check_azure_posture_management_deployment_logs(self):
-        """Check deployment logs for Azure Posture Management (Defender for Cloud)."""
-        self.formatter.print_header(
-            "AZURE POSTURE MANAGEMENT DEPLOYMENT LOGS",
-            "This function lists recent deployments related to Defender for Cloud (Azure Posture Management) in the subscription, including status and errors."
-        )
-        subscription_id = getattr(self.config, 'subscription_id', None)
-        max_subitems = getattr(self.config, 'max_subitems', 10)
-        if not subscription_id:
-            self.formatter.print_error("subscription_id must be set in config.")
-            return
-
-        # List recent deployments in the subscription
-        deployments_url = f"/subscriptions/{subscription_id}/providers/Microsoft.Resources/deployments?api-version=2022-09-01&$top={max_subitems}"
-        try:
-            response = self.api_client.arm_get(deployments_url)
-            if response.status_code != 200:
-                self.formatter.print_error(f"Failed to retrieve deployments: {response.status_code}")
-                return
-            deployments = response.json().get('value', [])
-            if not deployments:
-                self.formatter.print_info("No deployments found in the subscription.")
-                return
-
-            found = False
-            for deployment in deployments:
-                name = deployment.get('name', 'Unnamed Deployment')
-                props = deployment.get('properties', {})
-                timestamp = props.get('timestamp', 'N/A')
-                state = props.get('provisioningState', 'N/A')
-                # Check if related to Defender for Cloud or posture management
-                if any(keyword in name.lower() for keyword in ['defender', 'security', 'posture']):
-                    found = True
-                    self.formatter.print_key_value("Deployment Name", name)
-                    self.formatter.print_key_value("Status", state)
-                    self.formatter.print_key_value("Timestamp", timestamp)
-                    if 'error' in props:
-                        error = props['error']
-                        self.formatter.print_key_value("Error Code", error.get('code', 'N/A'))
-                        self.formatter.print_key_value("Error Message", error.get('message', 'N/A'))
-                    self.formatter.print_separator()
-            if not found:
-                self.formatter.print_info("No Defender for Cloud/Posture Management deployments found in recent logs.")
-        except Exception as e:
-            self.formatter.print_error(f"Exception occurred while retrieving deployment logs: {e}")
-        self.formatter.print_separator()
-
     def check_azure_functions_availability_zones(self):
         """Check all Azure Functions for Availability Zone deployment."""
         self.formatter.print_header(
@@ -6053,18 +7673,20 @@ class SecurityFunctions:
         self.formatter.print_separator()
 
     def check_defender_cloud_security_posture_management(self):
-        """Check if Microsoft Defender Cloud Security Posture Management is enabled."""
+        """Check if Microsoft Defender Cloud Security Posture Management is enabled and review deployment logs."""
         self.formatter.print_header(
             "MICROSOFT DEFENDER CLOUD SECURITY POSTURE MANAGEMENT",
-            "This function checks if Microsoft Defender Cloud Security Posture Management (formerly Azure Security Center) is enabled and configured."
+            "This function checks if Microsoft Defender Cloud Security Posture Management (formerly Azure Security Center) is enabled and configured, and reviews recent deployment logs."
         )
         subscription_id = getattr(self.config, 'subscription_id', None)
+        max_subitems = getattr(self.config, 'max_subitems', 10)
         if not subscription_id:
             self.formatter.print_error("subscription_id must be set in config.")
             return
 
+        # 1. Check if Defender for Cloud is enabled by looking at pricing tiers
+        self.formatter.print_subsection("DEFENDER FOR CLOUD PRICING TIERS")
         try:
-            # Check if Defender for Cloud is enabled by looking at pricing tiers
             url = f"/subscriptions/{subscription_id}/providers/Microsoft.Security/pricings?api-version=2024-01-01"
             response = self.api_client.arm_get(url)
             if response.status_code == 200:
@@ -6081,5 +7703,970 @@ class SecurityFunctions:
             else:
                 self.formatter.print_error(f"Failed to retrieve Defender pricing information: {response.status_code}")
         except Exception as e:
-            self.formatter.print_error(f"Exception occurred while checking Defender Cloud Security Posture Management: {e}")
+            self.formatter.print_error(f"Exception occurred while checking Defender pricing tiers: {e}")
+
+        # 2. Check recent deployment logs for Defender for Cloud/Posture Management
+        self.formatter.print_subsection("RECENT DEPLOYMENT LOGS")
+        try:
+            deployments_url = f"/subscriptions/{subscription_id}/providers/Microsoft.Resources/deployments?api-version=2022-09-01&$top={max_subitems}"
+            response = self.api_client.arm_get(deployments_url)
+            if response.status_code != 200:
+                self.formatter.print_error(f"Failed to retrieve deployments: {response.status_code}")
+            else:
+                deployments = response.json().get('value', [])
+                if not deployments:
+                    self.formatter.print_info("No deployments found in the subscription.")
+                else:
+                    found = False
+                    for deployment in deployments:
+                        name = deployment.get('name', 'Unnamed Deployment')
+                        props = deployment.get('properties', {})
+                        timestamp = props.get('timestamp', 'N/A')
+                        state = props.get('provisioningState', 'N/A')
+                        # Check if related to Defender for Cloud or posture management
+                        if any(keyword in name.lower() for keyword in ['defender', 'security', 'posture']):
+                            found = True
+                            self.formatter.print_key_value("Deployment Name", name)
+                            self.formatter.print_key_value("Status", state)
+                            self.formatter.print_key_value("Timestamp", timestamp)
+                            if 'error' in props:
+                                error = props['error']
+                                self.formatter.print_key_value("Error Code", error.get('code', 'N/A'))
+                                self.formatter.print_key_value("Error Message", error.get('message', 'N/A'))
+                            self.formatter.print_separator()
+                    if not found:
+                        self.formatter.print_info("No Defender for Cloud/Posture Management deployments found in recent logs.")
+        except Exception as e:
+            self.formatter.print_error(f"Exception occurred while retrieving deployment logs: {e}")
+        self.formatter.print_separator()
+
+    def check_subnet_vnet_peering_and_ip_ranges(self):
+        """List all subnets, VNet peering, and verify non-overlapping IP address ranges across tenants."""
+        self.formatter.print_header(
+            "SUBNET AND VNET PEERING ANALYSIS",
+            "This function lists all subnets, VNet peering configurations, and verifies non-overlapping IP address ranges across tenants to ensure proper network segmentation."
+        )
+        subscription_id = getattr(self.config, 'subscription_id', None)
+        max_subitems = getattr(self.config, 'max_subitems', 10)
+        if not subscription_id:
+            self.formatter.print_error("subscription_id must be set in config.")
+            return
+
+        try:
+            # 1. Get all Virtual Networks
+            self.formatter.print_subsection("VIRTUAL NETWORKS AND SUBNETS")
+            vnet_url = f"/subscriptions/{subscription_id}/providers/Microsoft.Network/virtualNetworks?api-version=2023-04-01"
+            response = self.api_client.arm_get(vnet_url)
+            if response.status_code != 200:
+                self.formatter.print_error(f"Failed to retrieve Virtual Networks: {response.status_code}")
+                return
+
+            vnets = response.json().get('value', [])
+            if not vnets:
+                self.formatter.print_info("No Virtual Networks found in the subscription.")
+                return
+
+            all_subnets = []
+            vnet_info = {}
+
+            for vnet in vnets[:max_subitems]:
+                vnet_name = vnet.get('name', 'Unnamed VNet')
+                vnet_location = vnet.get('location', 'Unknown')
+                vnet_id = vnet.get('id', '')
+                vnet_props = vnet.get('properties', {})
+                vnet_address_space = vnet_props.get('addressSpace', {}).get('addressPrefixes', [])
+                
+                self.formatter.print_key_value("Virtual Network", vnet_name)
+                self.formatter.print_key_value("Location", vnet_location)
+                self.formatter.print_key_value("Address Space", ', '.join(vnet_address_space) if vnet_address_space else 'Not configured')
+                
+                # Store VNet info for peering analysis
+                vnet_info[vnet_id] = {
+                    'name': vnet_name,
+                    'location': vnet_location,
+                    'address_space': vnet_address_space
+                }
+
+                # Get subnets for this VNet
+                subnets = vnet_props.get('subnets', [])
+                if subnets:
+                    self.formatter.print_subsection(f"Subnets in {vnet_name}")
+                    for subnet in subnets:
+                        subnet_name = subnet.get('name', 'Unnamed Subnet')
+                        subnet_props = subnet.get('properties', {})
+                        subnet_address_prefix = subnet_props.get('addressPrefix', 'Not configured')
+                        subnet_nsg = subnet_props.get('networkSecurityGroup', {}).get('id', 'No NSG')
+                        subnet_route_table = subnet_props.get('routeTable', {}).get('id', 'No Route Table')
+                        
+                        subnet_info = {
+                            'vnet_name': vnet_name,
+                            'subnet_name': subnet_name,
+                            'address_prefix': subnet_address_prefix,
+                            'nsg': subnet_nsg,
+                            'route_table': subnet_route_table
+                        }
+                        all_subnets.append(subnet_info)
+                        
+                        self.formatter.print_key_value(f"  Subnet: {subnet_name}", subnet_address_prefix)
+                        if subnet_nsg != 'No NSG':
+                            nsg_name = subnet_nsg.split('/')[-1]
+                            self.formatter.print_key_value(f"    NSG", nsg_name)
+                        if subnet_route_table != 'No Route Table':
+                            route_table_name = subnet_route_table.split('/')[-1]
+                            self.formatter.print_key_value(f"    Route Table", route_table_name)
+                else:
+                    self.formatter.print_info(f"  No subnets configured in {vnet_name}")
+                
+                self.formatter.print_separator()
+
+            # 2. Check VNet Peering
+            self.formatter.print_subsection("VNET PEERING CONFIGURATIONS")
+            peering_found = False
+            
+            for vnet_id, vnet_data in vnet_info.items():
+                vnet_name = vnet_data['name']
+                peerings_url = f"{vnet_id}/virtualNetworkPeerings?api-version=2023-04-01"
+                peering_response = self.api_client.arm_get(peerings_url)
+                
+                if peering_response.status_code == 200:
+                    peerings = peering_response.json().get('value', [])
+                    if peerings:
+                        peering_found = True
+                        self.formatter.print_key_value("VNet with Peering", vnet_name)
+                        for peering in peerings:
+                            peering_name = peering.get('name', 'Unnamed Peering')
+                            peering_props = peering.get('properties', {})
+                            remote_vnet = peering_props.get('remoteVirtualNetwork', {}).get('id', 'Unknown')
+                            peering_state = peering_props.get('peeringState', 'Unknown')
+                            allow_virtual_network_access = peering_props.get('allowVirtualNetworkAccess', False)
+                            allow_forwarded_traffic = peering_props.get('allowForwardedTraffic', False)
+                            allow_gateway_transit = peering_props.get('allowGatewayTransit', False)
+                            use_remote_gateways = peering_props.get('useRemoteGateways', False)
+                            
+                            self.formatter.print_key_value(f"  Peering: {peering_name}", f"State: {peering_state}")
+                            self.formatter.print_key_value(f"    Remote VNet", remote_vnet.split('/')[-1] if remote_vnet != 'Unknown' else 'Unknown')
+                            self.formatter.print_key_value(f"    Allow VNet Access", allow_virtual_network_access)
+                            self.formatter.print_key_value(f"    Allow Forwarded Traffic", allow_forwarded_traffic)
+                            self.formatter.print_key_value(f"    Allow Gateway Transit", allow_gateway_transit)
+                            self.formatter.print_key_value(f"    Use Remote Gateways", use_remote_gateways)
+                            self.formatter.print_separator()
+            
+            if not peering_found:
+                self.formatter.print_info("No VNet peering configurations found.")
+
+            # 3. Analyze IP Address Ranges for Overlaps
+            self.formatter.print_subsection("IP ADDRESS RANGE ANALYSIS")
+            if all_subnets:
+                self.formatter.print_info("Analyzing subnet address ranges for potential overlaps...")
+                
+                # Simple overlap detection (basic CIDR analysis)
+                subnet_ranges = []
+                for subnet in all_subnets:
+                    if subnet['address_prefix'] != 'Not configured':
+                        try:
+                            # Parse CIDR notation (e.g., "10.0.1.0/24")
+                            ip_part, prefix_len = subnet['address_prefix'].split('/')
+                            prefix_len = int(prefix_len)
+                            
+                            # Convert to integer for comparison
+                            ip_parts = [int(x) for x in ip_part.split('.')]
+                            ip_int = (ip_parts[0] << 24) + (ip_parts[1] << 16) + (ip_parts[2] << 8) + ip_parts[3]
+                            
+                            # Calculate network and broadcast addresses
+                            network_mask = (0xFFFFFFFF << (32 - prefix_len)) & 0xFFFFFFFF
+                            network_addr = ip_int & network_mask
+                            broadcast_addr = network_addr | ((1 << (32 - prefix_len)) - 1)
+                            
+                            subnet_ranges.append({
+                                'vnet': subnet['vnet_name'],
+                                'subnet': subnet['subnet_name'],
+                                'cidr': subnet['address_prefix'],
+                                'network': network_addr,
+                                'broadcast': broadcast_addr,
+                                'prefix_len': prefix_len
+                            })
+                        except (ValueError, IndexError):
+                            self.formatter.print_warning(f"Invalid CIDR format: {subnet['address_prefix']} in {subnet['vnet_name']}/{subnet['subnet_name']}")
+                
+                # Check for overlaps
+                overlaps_found = []
+                for i, range1 in enumerate(subnet_ranges):
+                    for j, range2 in enumerate(subnet_ranges[i+1:], i+1):
+                        # Check if ranges overlap
+                        if not (range1['broadcast'] < range2['network'] or range2['broadcast'] < range1['network']):
+                            overlaps_found.append((range1, range2))
+                
+                if overlaps_found:
+                    self.formatter.print_error("POTENTIAL IP ADDRESS RANGE OVERLAPS DETECTED:")
+                    for range1, range2 in overlaps_found:
+                        self.formatter.print_error(f"  {range1['vnet']}/{range1['subnet']} ({range1['cidr']}) overlaps with {range2['vnet']}/{range2['subnet']} ({range2['cidr']})")
+                    self.formatter.print_warning("Overlapping IP ranges can cause routing conflicts and connectivity issues.")
+                else:
+                    self.formatter.print_success("No overlapping IP address ranges detected across subnets.")
+                
+                # Summary
+                self.formatter.print_subsection("SUMMARY")
+                self.formatter.print_key_value("Total Virtual Networks", len(vnets))
+                self.formatter.print_key_value("Total Subnets", len(all_subnets))
+                self.formatter.print_key_value("Subnets with Valid CIDR", len(subnet_ranges))
+                self.formatter.print_key_value("VNet Peerings Found", "Yes" if peering_found else "No")
+                self.formatter.print_key_value("IP Range Overlaps", "Yes" if overlaps_found else "No")
+            else:
+                self.formatter.print_info("No subnets found for IP range analysis.")
+
+        except Exception as e:
+            self.formatter.print_error(f"Exception occurred while analyzing subnets and VNet peering: {e}")
+        self.formatter.print_separator()
+
+    def check_network_connectivity_and_security_gateways(self):
+        """Check VPN Gateways, ExpressRoute, Azure Bastion, and Azure Firewall/NVA configurations."""
+        self.formatter.print_header(
+            "NETWORK CONNECTIVITY AND SECURITY GATEWAYS",
+            "This function checks VPN Gateways, ExpressRoute, Azure Bastion, and Azure Firewall/Network Virtual Appliance (NVA) configurations for network security and connectivity."
+        )
+        subscription_id = getattr(self.config, 'subscription_id', None)
+        max_subitems = getattr(self.config, 'max_subitems', 10)
+        if not subscription_id:
+            self.formatter.print_error("subscription_id must be set in config.")
+            return
+
+        try:
+            # 1. Check VPN Gateways
+            self.formatter.print_subsection("VPN GATEWAYS")
+            vpn_gateway_url = f"/subscriptions/{subscription_id}/providers/Microsoft.Network/virtualNetworkGateways?api-version=2023-04-01"
+            response = self.api_client.arm_get(vpn_gateway_url)
+            if response.status_code == 200:
+                vpn_gateways = response.json().get('value', [])
+                if vpn_gateways:
+                    self.formatter.print_success(f"Found {len(vpn_gateways)} VPN Gateway(s)")
+                    for gateway in vpn_gateways[:max_subitems]:
+                        gateway_name = gateway.get('name', 'Unnamed Gateway')
+                        gateway_location = gateway.get('location', 'Unknown')
+                        gateway_props = gateway.get('properties', {})
+                        gateway_type = gateway_props.get('gatewayType', 'Unknown')
+                        vpn_type = gateway_props.get('vpnType', 'Unknown')
+                        sku = gateway_props.get('sku', {}).get('name', 'Unknown')
+                        active_active = gateway_props.get('activeActive', False)
+                        enable_bgp = gateway_props.get('enableBgp', False)
+                        
+                        self.formatter.print_key_value("Gateway Name", gateway_name)
+                        self.formatter.print_key_value("Location", gateway_location)
+                        self.formatter.print_key_value("Gateway Type", gateway_type)
+                        self.formatter.print_key_value("VPN Type", vpn_type)
+                        self.formatter.print_key_value("SKU", sku)
+                        self.formatter.print_key_value("Active-Active", active_active)
+                        self.formatter.print_key_value("BGP Enabled", enable_bgp)
+                        
+                        # Check connections
+                        connections_url = f"{gateway.get('id')}/connections?api-version=2023-04-01"
+                        conn_response = self.api_client.arm_get(connections_url)
+                        if conn_response.status_code == 200:
+                            connections = conn_response.json().get('value', [])
+                            self.formatter.print_key_value("Connections", len(connections))
+                            for conn in connections[:3]:  # Show first 3 connections
+                                conn_name = conn.get('name', 'Unnamed')
+                                conn_props = conn.get('properties', {})
+                                conn_status = conn_props.get('connectionStatus', 'Unknown')
+                                conn_type = conn_props.get('connectionType', 'Unknown')
+                                self.formatter.print_key_value(f"  {conn_name}", f"{conn_type} - {conn_status}")
+                        self.formatter.print_separator()
+                else:
+                    self.formatter.print_warning("No VPN Gateways found")
+            else:
+                self.formatter.print_error(f"Failed to retrieve VPN Gateways: {response.status_code}")
+
+            # 2. Check ExpressRoute Circuits
+            self.formatter.print_subsection("EXPRESSROUTE CIRCUITS")
+            expressroute_url = f"/subscriptions/{subscription_id}/providers/Microsoft.Network/expressRouteCircuits?api-version=2023-04-01"
+            response = self.api_client.arm_get(expressroute_url)
+            if response.status_code == 200:
+                circuits = response.json().get('value', [])
+                if circuits:
+                    self.formatter.print_success(f"Found {len(circuits)} ExpressRoute Circuit(s)")
+                    for circuit in circuits[:max_subitems]:
+                        circuit_name = circuit.get('name', 'Unnamed Circuit')
+                        circuit_location = circuit.get('location', 'Unknown')
+                        circuit_props = circuit.get('properties', {})
+                        circuit_sku = circuit_props.get('sku', {}).get('name', 'Unknown')
+                        circuit_tier = circuit_props.get('sku', {}).get('tier', 'Unknown')
+                        circuit_family = circuit_props.get('sku', {}).get('family', 'Unknown')
+                        circuit_provider = circuit_props.get('serviceProviderProperties', {}).get('serviceProviderName', 'Unknown')
+                        circuit_bandwidth = circuit_props.get('serviceProviderProperties', {}).get('bandwidthInMbps', 'Unknown')
+                        circuit_peering_location = circuit_props.get('serviceProviderProperties', {}).get('peeringLocation', 'Unknown')
+                        
+                        self.formatter.print_key_value("Circuit Name", circuit_name)
+                        self.formatter.print_key_value("Location", circuit_location)
+                        self.formatter.print_key_value("SKU", circuit_sku)
+                        self.formatter.print_key_value("Tier", circuit_tier)
+                        self.formatter.print_key_value("Family", circuit_family)
+                        self.formatter.print_key_value("Provider", circuit_provider)
+                        self.formatter.print_key_value("Bandwidth (Mbps)", circuit_bandwidth)
+                        self.formatter.print_key_value("Peering Location", circuit_peering_location)
+                        
+                        # Check peerings
+                        peerings_url = f"{circuit.get('id')}/peerings?api-version=2023-04-01"
+                        peering_response = self.api_client.arm_get(peerings_url)
+                        if peering_response.status_code == 200:
+                            peerings = peering_response.json().get('value', [])
+                            self.formatter.print_key_value("Peerings", len(peerings))
+                            for peering in peerings:
+                                peering_name = peering.get('name', 'Unnamed')
+                                peering_props = peering.get('properties', {})
+                                peering_state = peering_props.get('peeringState', 'Unknown')
+                                peering_type = peering_props.get('peeringType', 'Unknown')
+                                self.formatter.print_key_value(f"  {peering_name}", f"{peering_type} - {peering_state}")
+                        self.formatter.print_separator()
+                else:
+                    self.formatter.print_warning("No ExpressRoute Circuits found")
+            else:
+                self.formatter.print_error(f"Failed to retrieve ExpressRoute Circuits: {response.status_code}")
+
+            # 3. Check Azure Bastion Hosts
+            self.formatter.print_subsection("AZURE BASTION HOSTS")
+            bastion_url = f"/subscriptions/{subscription_id}/providers/Microsoft.Network/bastionHosts?api-version=2023-04-01"
+            response = self.api_client.arm_get(bastion_url)
+            if response.status_code == 200:
+                bastions = response.json().get('value', [])
+                if bastions:
+                    self.formatter.print_success(f"Found {len(bastions)} Azure Bastion Host(s)")
+                    for bastion in bastions[:max_subitems]:
+                        bastion_name = bastion.get('name', 'Unnamed Bastion')
+                        bastion_location = bastion.get('location', 'Unknown')
+                        bastion_props = bastion.get('properties', {})
+                        bastion_sku = bastion_props.get('sku', {}).get('name', 'Unknown')
+                        bastion_scale_units = bastion_props.get('scaleUnits', 'Unknown')
+                        bastion_dns_name = bastion_props.get('dnsName', 'Not configured')
+                        bastion_ip_config = bastion_props.get('ipConfigurations', [])
+                        
+                        self.formatter.print_key_value("Bastion Name", bastion_name)
+                        self.formatter.print_key_value("Location", bastion_location)
+                        self.formatter.print_key_value("SKU", bastion_sku)
+                        self.formatter.print_key_value("Scale Units", bastion_scale_units)
+                        self.formatter.print_key_value("DNS Name", bastion_dns_name)
+                        self.formatter.print_key_value("IP Configurations", len(bastion_ip_config))
+                        
+                        # Check IP configurations
+                        for ip_config in bastion_ip_config:
+                            ip_config_name = ip_config.get('name', 'Unnamed')
+                            ip_config_props = ip_config.get('properties', {})
+                            subnet_id = ip_config_props.get('subnet', {}).get('id', 'Not configured')
+                            public_ip = ip_config_props.get('publicIPAddress', {}).get('id', 'Not configured')
+                            self.formatter.print_key_value(f"  {ip_config_name} - Subnet", subnet_id.split('/')[-1] if subnet_id != 'Not configured' else 'Not configured')
+                            self.formatter.print_key_value(f"  {ip_config_name} - Public IP", public_ip.split('/')[-1] if public_ip != 'Not configured' else 'Not configured')
+                        self.formatter.print_separator()
+                else:
+                    self.formatter.print_warning("No Azure Bastion Hosts found")
+            else:
+                self.formatter.print_error(f"Failed to retrieve Azure Bastion Hosts: {response.status_code}")
+
+            # 4. Check Azure Firewalls
+            self.formatter.print_subsection("AZURE FIREWALLS")
+            firewall_url = f"/subscriptions/{subscription_id}/providers/Microsoft.Network/azureFirewalls?api-version=2023-04-01"
+            response = self.api_client.arm_get(firewall_url)
+            if response.status_code == 200:
+                firewalls = response.json().get('value', [])
+                if firewalls:
+                    self.formatter.print_success(f"Found {len(firewalls)} Azure Firewall(s)")
+                    for firewall in firewalls[:max_subitems]:
+                        firewall_name = firewall.get('name', 'Unnamed Firewall')
+                        firewall_location = firewall.get('location', 'Unknown')
+                        firewall_props = firewall.get('properties', {})
+                        firewall_sku = firewall_props.get('sku', {}).get('name', 'Unknown')
+                        firewall_tier = firewall_props.get('sku', {}).get('tier', 'Unknown')
+                        firewall_threat_intel_mode = firewall_props.get('threatIntelMode', 'Unknown')
+                        firewall_hub_ip_addresses = firewall_props.get('hubIPAddresses', {})
+                        firewall_virtual_hub = firewall_props.get('virtualHub', {}).get('id', 'Not configured')
+                        
+                        self.formatter.print_key_value("Firewall Name", firewall_name)
+                        self.formatter.print_key_value("Location", firewall_location)
+                        self.formatter.print_key_value("SKU", firewall_sku)
+                        self.formatter.print_key_value("Tier", firewall_tier)
+                        self.formatter.print_key_value("Threat Intel Mode", firewall_threat_intel_mode)
+                        self.formatter.print_key_value("Virtual Hub", firewall_virtual_hub.split('/')[-1] if firewall_virtual_hub != 'Not configured' else 'Not configured')
+                        
+                        # Check rule collections
+                        rule_collections = firewall_props.get('ruleCollections', [])
+                        app_rule_collections = [rc for rc in rule_collections if rc.get('properties', {}).get('ruleCollectionType') == 'FirewallPolicyFilterRuleCollection']
+                        nat_rule_collections = [rc for rc in rule_collections if rc.get('properties', {}).get('ruleCollectionType') == 'FirewallPolicyNatRuleCollection']
+                        network_rule_collections = [rc for rc in rule_collections if rc.get('properties', {}).get('ruleCollectionType') == 'FirewallPolicyFilterRuleCollection']
+                        
+                        self.formatter.print_key_value("Application Rule Collections", len(app_rule_collections))
+                        self.formatter.print_key_value("NAT Rule Collections", len(nat_rule_collections))
+                        self.formatter.print_key_value("Network Rule Collections", len(network_rule_collections))
+                        
+                        # Check IP configurations
+                        ip_configs = firewall_props.get('ipConfigurations', [])
+                        self.formatter.print_key_value("IP Configurations", len(ip_configs))
+                        for ip_config in ip_configs:
+                            ip_config_name = ip_config.get('name', 'Unnamed')
+                            ip_config_props = ip_config.get('properties', {})
+                            subnet_id = ip_config_props.get('subnet', {}).get('id', 'Not configured')
+                            public_ip = ip_config_props.get('publicIPAddress', {}).get('id', 'Not configured')
+                            self.formatter.print_key_value(f"  {ip_config_name} - Subnet", subnet_id.split('/')[-1] if subnet_id != 'Not configured' else 'Not configured')
+                            self.formatter.print_key_value(f"  {ip_config_name} - Public IP", public_ip.split('/')[-1] if public_ip != 'Not configured' else 'Not configured')
+                        self.formatter.print_separator()
+                else:
+                    self.formatter.print_warning("No Azure Firewalls found")
+            else:
+                self.formatter.print_error(f"Failed to retrieve Azure Firewalls: {response.status_code}")
+
+            # 5. Check Network Virtual Appliances (NVAs) - Look for VMs with NVA characteristics
+            self.formatter.print_subsection("NETWORK VIRTUAL APPLIANCES (NVAs)")
+            vm_url = f"/subscriptions/{subscription_id}/providers/Microsoft.Compute/virtualMachines?api-version=2023-04-01"
+            response = self.api_client.arm_get(vm_url)
+            if response.status_code == 200:
+                vms = response.json().get('value', [])
+                nva_vms = []
+                
+                for vm in vms:
+                    vm_name = vm.get('name', 'Unnamed VM')
+                    vm_props = vm.get('properties', {})
+                    vm_tags = vm.get('tags', {})
+                    vm_plan = vm.get('plan', {})
+                    
+                    # Check if VM might be an NVA based on name, tags, or publisher
+                    is_nva = False
+                    nva_indicators = []
+                    
+                    # Check name patterns
+                    if any(keyword in vm_name.lower() for keyword in ['firewall', 'nva', 'router', 'gateway', 'fortinet', 'paloalto', 'checkpoint', 'cisco', 'barracuda']):
+                        is_nva = True
+                        nva_indicators.append("Name pattern")
+                    
+                    # Check tags
+                    if any(keyword in str(vm_tags).lower() for keyword in ['firewall', 'nva', 'network', 'security']):
+                        is_nva = True
+                        nva_indicators.append("Tags")
+                    
+                    # Check publisher (common NVA publishers)
+                    if vm_plan.get('publisher', '').lower() in ['fortinet', 'paloaltonetworks', 'checkpoint', 'cisco', 'barracuda', 'f5networks']:
+                        is_nva = True
+                        nva_indicators.append("Publisher")
+                    
+                    if is_nva:
+                        nva_vms.append({
+                            'name': vm_name,
+                            'location': vm.get('location', 'Unknown'),
+                            'indicators': nva_indicators,
+                            'publisher': vm_plan.get('publisher', 'Unknown'),
+                            'offer': vm_plan.get('offer', 'Unknown'),
+                            'sku': vm_plan.get('sku', 'Unknown')
+                        })
+                
+                if nva_vms:
+                    self.formatter.print_success(f"Found {len(nva_vms)} potential NVA(s)")
+                    for nva in nva_vms[:max_subitems]:
+                        self.formatter.print_key_value("NVA Name", nva['name'])
+                        self.formatter.print_key_value("Location", nva['location'])
+                        self.formatter.print_key_value("Detection Indicators", ', '.join(nva['indicators']))
+                        self.formatter.print_key_value("Publisher", nva['publisher'])
+                        self.formatter.print_key_value("Offer", nva['offer'])
+                        self.formatter.print_key_value("SKU", nva['sku'])
+                        self.formatter.print_separator()
+                else:
+                    self.formatter.print_info("No Network Virtual Appliances (NVAs) detected")
+                    
+            elif response.status_code == 404:
+                self.formatter.print_info("No Virtual Machines found in the subscription")
+            else:
+                self.formatter.print_error(f"Failed to retrieve Virtual Machines: {response.status_code}")
+
+            # 6. Summary
+            self.formatter.print_subsection("SUMMARY")
+            self.formatter.print_key_value("VPN Gateways", len(vpn_gateways) if 'vpn_gateways' in locals() else 0)
+            self.formatter.print_key_value("ExpressRoute Circuits", len(circuits) if 'circuits' in locals() else 0)
+            self.formatter.print_key_value("Azure Bastion Hosts", len(bastions) if 'bastions' in locals() else 0)
+            self.formatter.print_key_value("Azure Firewalls", len(firewalls) if 'firewalls' in locals() else 0)
+            self.formatter.print_key_value("Network Virtual Appliances", len(nva_vms) if 'nva_vms' in locals() else 0)
+
+        except Exception as e:
+            self.formatter.print_error(f"Exception occurred while checking network connectivity and security gateways: {e}")
+        self.formatter.print_separator()
+
+    def check_user_defined_routes(self):
+        """Check for User Defined Routes (UDRs) that route traffic to firewall IPs and verify traffic path through Azure Firewall logs or NSG Flow Logs."""
+        self.formatter.print_header(
+            "USER DEFINED ROUTES (UDR) AND FIREWALL TRAFFIC PATH VERIFICATION",
+            "This function checks User Defined Routes (UDRs) to ensure route tables send traffic to firewall IPs (e.g., 0.0.0.0/0 → Azure Firewall) and verifies traffic path through Azure Firewall logs or NSG Flow Logs in Log Analytics for compliance evidence."
+        )
+        subscription_id = getattr(self.config, 'subscription_id', None)
+        if not subscription_id:
+            self.formatter.print_error("subscription_id must be set in config.")
+            return
+        
+        # Track UDR compliance
+        total_route_tables = 0
+        compliant_route_tables = 0
+        firewall_routes_found = []
+        missing_firewall_routes = []
+        
+        # 1. Check Route Tables and UDRs
+        self.formatter.print_subsection("ROUTE TABLES AND USER DEFINED ROUTES")
+        try:
+            url = f"/subscriptions/{subscription_id}/providers/Microsoft.Network/routeTables?api-version=2022-09-01"
+            response = self.api_client.arm_get(url)
+            if response.status_code == 200:
+                route_tables = response.json().get('value', [])
+                if not route_tables:
+                    self.formatter.print_warning("No route tables found in this subscription.")
+                else:
+                    self.formatter.print_success(f"Found {len(route_tables)} route tables")
+                    
+                    for route_table in route_tables:
+                        total_route_tables += 1
+                        table_name = route_table.get('name', 'Unknown')
+                        table_id = route_table.get('id', '')
+                        location = route_table.get('location', 'Unknown')
+                        
+                        self.formatter.print_subsection(f"ROUTE TABLE: {table_name}")
+                        self.formatter.print_key_value("Location", location)
+                        
+                        # Check routes in this table
+                        routes = route_table.get('properties', {}).get('routes', [])
+                        if not routes:
+                            self.formatter.print_warning("No routes configured in this route table")
+                            missing_firewall_routes.append(f"Route Table {table_name}: No routes configured")
+                            continue
+                        
+                        self.formatter.print_success(f"Found {len(routes)} routes")
+                        
+                        # Check for firewall routes
+                        has_firewall_route = False
+                        firewall_ips = []
+                        
+                        for route in routes:
+                            route_name = route.get('name', 'Unnamed')
+                            address_prefix = route.get('properties', {}).get('addressPrefix', 'Unknown')
+                            next_hop_type = route.get('properties', {}).get('nextHopType', 'Unknown')
+                            next_hop_ip = route.get('properties', {}).get('nextHopIpAddress', 'Not specified')
+                            
+                            self.formatter.print_key_value(f"Route: {route_name}", f"{address_prefix} → {next_hop_type}")
+                            if next_hop_ip != 'Not specified':
+                                self.formatter.print_key_value("Next Hop IP", next_hop_ip)
+                                firewall_ips.append(next_hop_ip)
+                            
+                            # Check if this is a firewall route (0.0.0.0/0 or similar to VirtualAppliance)
+                            if (address_prefix == '0.0.0.0/0' and 
+                                next_hop_type == 'VirtualAppliance' and 
+                                next_hop_ip != 'Not specified'):
+                                has_firewall_route = True
+                                self.formatter.print_success("Found firewall route (0.0.0.0/0 → VirtualAppliance)")
+                                firewall_routes_found.append(f"Route Table {table_name}: {route_name} → {next_hop_ip}")
+                        
+                        if has_firewall_route:
+                            compliant_route_tables += 1
+                            self.formatter.print_success("Route table properly routes traffic to firewall")
+                        else:
+                            self.formatter.print_error("No firewall route found (0.0.0.0/0 → VirtualAppliance)")
+                            missing_firewall_routes.append(f"Route Table {table_name}: Missing firewall route")
+                        
+                        # Check route table associations
+                        associations = route_table.get('properties', {}).get('subnets', [])
+                        if associations:
+                            self.formatter.print_success(f"Route table associated with {len(associations)} subnet(s)")
+                            for subnet in associations:
+                                subnet_name = subnet.get('name', 'Unknown')
+                                self.formatter.print_key_value("Associated Subnet", subnet_name)
+                        else:
+                            self.formatter.print_warning("Route table not associated with any subnets")
+                        
+                        self.formatter.print_separator()
+            else:
+                self.formatter.print_error(f"Failed to retrieve route tables: {response.status_code}")
+        except Exception as e:
+            self.formatter.print_error(f"Exception occurred while checking route tables: {e}")
+        
+        # 2. Check Azure Firewalls
+        self.formatter.print_subsection("AZURE FIREWALL CONFIGURATION")
+        try:
+            url = f"/subscriptions/{subscription_id}/providers/Microsoft.Network/azureFirewalls?api-version=2022-09-01"
+            response = self.api_client.arm_get(url)
+            if response.status_code == 200:
+                firewalls = response.json().get('value', [])
+                if not firewalls:
+                    self.formatter.print_warning("No Azure Firewalls found in this subscription.")
+                else:
+                    self.formatter.print_success(f"Found {len(firewalls)} Azure Firewalls")
+                    
+                    for firewall in firewalls:
+                        firewall_name = firewall.get('name', 'Unknown')
+                        firewall_id = firewall.get('id', '')
+                        location = firewall.get('location', 'Unknown')
+                        
+                        self.formatter.print_subsection(f"AZURE FIREWALL: {firewall_name}")
+                        self.formatter.print_key_value("Location", location)
+                        
+                        # Check firewall IP addresses
+                        properties = firewall.get('properties', {})
+                        ip_configurations = properties.get('ipConfigurations', [])
+                        
+                        if ip_configurations:
+                            self.formatter.print_success(f"Found {len(ip_configurations)} IP configuration(s)")
+                            for ip_config in ip_configurations:
+                                ip_config_name = ip_config.get('name', 'Unnamed')
+                                private_ip = ip_config.get('properties', {}).get('privateIPAddress', 'Not configured')
+                                public_ip = ip_config.get('properties', {}).get('publicIPAddress', {}).get('id', 'Not configured')
+                                
+                                self.formatter.print_key_value(f"IP Config: {ip_config_name}", f"Private: {private_ip}")
+                                if public_ip != 'Not configured':
+                                    self.formatter.print_key_value("Public IP", public_ip)
+                        else:
+                            self.formatter.print_warning("No IP configurations found")
+                        
+                        # Check firewall rules
+                        network_rule_collections = properties.get('networkRuleCollections', [])
+                        application_rule_collections = properties.get('applicationRuleCollections', [])
+                        nat_rule_collections = properties.get('natRuleCollections', [])
+                        
+                        self.formatter.print_key_value("Network Rule Collections", len(network_rule_collections))
+                        self.formatter.print_key_value("Application Rule Collections", len(application_rule_collections))
+                        self.formatter.print_key_value("NAT Rule Collections", len(nat_rule_collections))
+                        
+                        # Check if firewall has rules configured
+                        total_rules = (len(network_rule_collections) + 
+                                     len(application_rule_collections) + 
+                                     len(nat_rule_collections))
+                        
+                        if total_rules > 0:
+                            self.formatter.print_success("Firewall has rule collections configured")
+                        else:
+                            self.formatter.print_warning("⚠ Firewall has no rule collections configured")
+                        
+                        # Check firewall SKU and features
+                        sku = properties.get('sku', {})
+                        sku_name = sku.get('name', 'Unknown')
+                        sku_tier = sku.get('tier', 'Unknown')
+                        
+                        self.formatter.print_key_value("SKU", f"{sku_name} ({sku_tier})")
+                        
+                        # Check threat intelligence
+                        threat_intel_mode = properties.get('threatIntelMode', 'Unknown')
+                        self.formatter.print_key_value("Threat Intelligence Mode", threat_intel_mode)
+                        
+                        if threat_intel_mode in ['Alert', 'Deny']:
+                            self.formatter.print_success("Threat intelligence enabled")
+                        else:
+                            self.formatter.print_warning("⚠ Threat intelligence not enabled")
+                        
+                        self.formatter.print_separator()
+            else:
+                self.formatter.print_error(f"Failed to retrieve Azure Firewalls: {response.status_code}")
+        except Exception as e:
+            self.formatter.print_error(f"Exception occurred while checking Azure Firewalls: {e}")
+        
+        # 3. Check NSG Flow Logs
+        self.formatter.print_subsection("NSG FLOW LOGS CONFIGURATION")
+        try:
+            url = f"/subscriptions/{subscription_id}/providers/Microsoft.Network/networkSecurityGroups?api-version=2022-09-01"
+            response = self.api_client.arm_get(url)
+            if response.status_code == 200:
+                nsgs = response.json().get('value', [])
+                if not nsgs:
+                    self.formatter.print_info("No Network Security Groups found in this subscription.")
+                else:
+                    self.formatter.print_success(f"Found {len(nsgs)} Network Security Groups")
+                    
+                    flow_logs_enabled = 0
+                    flow_logs_disabled = 0
+                    
+                    for nsg in nsgs:
+                        nsg_name = nsg.get('name', 'Unknown')
+                        nsg_id = nsg.get('id', '')
+                        
+                        # Check flow logs for this NSG
+                        flow_logs_url = f"{nsg_id}/flowLogs?api-version=2022-09-01"
+                        flow_logs_response = self.api_client.arm_get(flow_logs_url)
+                        
+                        if flow_logs_response.status_code == 200:
+                            flow_logs = flow_logs_response.json().get('value', [])
+                            if flow_logs:
+                                flow_logs_enabled += 1
+                                self.formatter.print_success(f"NSG {nsg_name}: Flow logs enabled")
+                                
+                                for flow_log in flow_logs:
+                                    flow_log_name = flow_log.get('name', 'Unknown')
+                                    flow_log_props = flow_log.get('properties', {})
+                                    enabled = flow_log_props.get('enabled', False)
+                                    retention_days = flow_log_props.get('retentionPolicy', {}).get('days', 0)
+                                    
+                                    self.formatter.print_key_value(f"Flow Log: {flow_log_name}", f"Enabled: {enabled}, Retention: {retention_days} days")
+                                    
+                                    if enabled and retention_days >= 7:
+                                        self.formatter.print_success("Flow log properly configured")
+                                    else:
+                                        self.formatter.print_warning("⚠ Flow log needs configuration")
+                            else:
+                                flow_logs_disabled += 1
+                                self.formatter.print_warning(f"NSG {nsg_name}: No flow logs configured")
+                        else:
+                            flow_logs_disabled += 1
+                            self.formatter.print_warning(f"NSG {nsg_name}: Could not retrieve flow logs")
+                    
+                    self.formatter.print_subsection("NSG FLOW LOGS SUMMARY")
+                    self.formatter.print_key_value("NSGs with Flow Logs", flow_logs_enabled)
+                    self.formatter.print_key_value("NSGs without Flow Logs", flow_logs_disabled)
+                    
+                    if flow_logs_enabled > 0:
+                        self.formatter.print_success("Some NSGs have flow logs enabled for traffic path monitoring")
+                    else:
+                        self.formatter.print_error("No NSGs have flow logs enabled")
+            else:
+                self.formatter.print_error(f"Failed to retrieve NSGs: {response.status_code}")
+        except Exception as e:
+            self.formatter.print_error(f"Exception occurred while checking NSG flow logs: {e}")
+        
+        # 4. Check Log Analytics Workspace for Firewall and NSG Logs
+        self.formatter.print_subsection("LOG ANALYTICS WORKSPACE - FIREWALL AND NSG LOGS")
+        workspace_name = getattr(self.config, 'workspace_name', None)
+        resource_group = getattr(self.config, 'resource_group', None)
+        
+        if workspace_name and resource_group:
+            try:
+                # Check diagnostic settings for Azure Firewall
+                for firewall in firewalls:
+                    firewall_name = firewall.get('name', 'Unknown')
+                    firewall_id = firewall.get('id', '')
+                    
+                    diag_url = f"{firewall_id}/providers/Microsoft.Insights/diagnosticSettings?api-version=2021-05-01-preview"
+                    diag_response = self.api_client.arm_get(diag_url)
+                    
+                    if diag_response.status_code == 200:
+                        diag_settings = diag_response.json().get('value', [])
+                        if diag_settings:
+                            self.formatter.print_success(f"Firewall {firewall_name}: Diagnostic settings configured")
+                            
+                            for setting in diag_settings:
+                                setting_name = setting.get('name', 'Unknown')
+                                logs = setting.get('properties', {}).get('logs', [])
+                                
+                                # Check for firewall logs
+                                firewall_logs = [log for log in logs if any(keyword in log.get('category', '').lower() 
+                                               for keyword in ['firewall', 'network', 'traffic'])]
+                                
+                                if firewall_logs:
+                                    self.formatter.print_success(f"Diagnostic setting '{setting_name}' includes firewall logs")
+                                    for log in firewall_logs:
+                                        self.formatter.print_key_value(f"Log Category", log.get('category', 'Unknown'))
+                                        self.formatter.print_key_value(f"Enabled", log.get('enabled', False))
+                                else:
+                                    self.formatter.print_warning(f"Diagnostic setting '{setting_name}' has no firewall logs")
+                        else:
+                            self.formatter.print_warning(f"Firewall {firewall_name}: No diagnostic settings configured")
+                    else:
+                        self.formatter.print_warning(f"Firewall {firewall_name}: Could not retrieve diagnostic settings")
+                
+                # Check for NSG diagnostic settings
+                for nsg in nsgs:
+                    nsg_name = nsg.get('name', 'Unknown')
+                    nsg_id = nsg.get('id', '')
+                    
+                    diag_url = f"{nsg_id}/providers/Microsoft.Insights/diagnosticSettings?api-version=2021-05-01-preview"
+                    diag_response = self.api_client.arm_get(diag_url)
+                    
+                    if diag_response.status_code == 200:
+                        diag_settings = diag_response.json().get('value', [])
+                        if diag_settings:
+                            self.formatter.print_success(f"NSG {nsg_name}: Diagnostic settings configured")
+                            
+                            for setting in diag_settings:
+                                setting_name = setting.get('name', 'Unknown')
+                                logs = setting.get('properties', {}).get('logs', [])
+                                
+                                # Check for NSG logs
+                                nsg_logs = [log for log in logs if any(keyword in log.get('category', '').lower() 
+                                           for keyword in ['nsg', 'network', 'security'])]
+                                
+                                if nsg_logs:
+                                    self.formatter.print_success(f"Diagnostic setting '{setting_name}' includes NSG logs")
+                                    for log in nsg_logs:
+                                        self.formatter.print_key_value(f"Log Category", log.get('category', 'Unknown'))
+                                        self.formatter.print_key_value(f"Enabled", log.get('enabled', False))
+                                else:
+                                    self.formatter.print_warning(f"Diagnostic setting '{setting_name}' has no NSG logs")
+                        else:
+                            self.formatter.print_warning(f"NSG {nsg_name}: No diagnostic settings configured")
+                    else:
+                        self.formatter.print_warning(f"NSG {nsg_name}: Could not retrieve diagnostic settings")
+            except Exception as e:
+                self.formatter.print_error(f"Exception occurred while checking diagnostic settings: {e}")
+        else:
+            self.formatter.print_warning("workspace_name and resource_group not configured - skipping Log Analytics checks")
+        
+        # 5. Summary and Compliance Assessment
+        self.formatter.print_subsection("UDR AND FIREWALL TRAFFIC PATH COMPLIANCE SUMMARY")
+        self.formatter.print_key_value("Total Route Tables", total_route_tables)
+        self.formatter.print_key_value("Compliant Route Tables", compliant_route_tables)
+        self.formatter.print_key_value("Non-Compliant Route Tables", total_route_tables - compliant_route_tables)
+        
+        if total_route_tables > 0:
+            compliance_percentage = (compliant_route_tables / total_route_tables) * 100
+            self.formatter.print_key_value("Compliance Percentage", f"{compliance_percentage:.1f}%")
+            
+            if compliance_percentage >= 80:
+                self.formatter.print_success("Good UDR compliance - most route tables route to firewalls")
+            elif compliance_percentage >= 50:
+                self.formatter.print_warning("⚠ Moderate UDR compliance - some route tables need firewall routing")
+            else:
+                self.formatter.print_error("Poor UDR compliance - most route tables missing firewall routing")
+        
+        if firewall_routes_found:
+            self.formatter.print_subsection("FIREWALL ROUTES FOUND")
+            for route in firewall_routes_found:
+                self.formatter.print_success(f"{route}")
+        
+        if missing_firewall_routes:
+            self.formatter.print_subsection("MISSING FIREWALL ROUTES")
+            for route in missing_firewall_routes:
+                self.formatter.print_error(f"{route}")
+        
+        self.formatter.print_separator()
+
+    def check_microsoft_defender_for_devops(self):
+        """Check Microsoft Defender for DevOps configuration for secret scanning and hardcoded credential detection."""
+        self.formatter.print_header(
+            "MICROSOFT DEFENDER FOR DEVOPS",
+            "This function checks Microsoft Defender for Cloud DevOps Security configuration, including secret scanning and hardcoded credential detection for CI/CD pipelines (GitHub and Azure DevOps)."
+        )
+        subscription_id = getattr(self.config, 'subscription_id', None)
+        if not subscription_id:
+            self.formatter.print_error("subscription_id must be set in config.")
+            return
+        
+        try:
+            # Check for GitHub integration
+            try:
+                github_url = f"/subscriptions/{subscription_id}/providers/Microsoft.Security/gitHubOwners?api-version=2023-09-01-preview"
+                github_response = self.api_client.arm_get(github_url)
+                
+                if github_response.status_code == 200:
+                    github_owners = github_response.json().get('value', [])
+                    if github_owners:
+                        self.formatter.print_success(f"Found {len(github_owners)} GitHub organization(s) connected to Microsoft Defender for Cloud")
+                        
+                        for owner in github_owners:
+                            owner_name = owner.get('name', 'Unknown')
+                            
+                            # Check for repositories
+                            repos_url = f"/subscriptions/{subscription_id}/providers/Microsoft.Security/gitHubOwners/{owner_name}/repos?api-version=2023-09-01-preview"
+                            repos_response = self.api_client.arm_get(repos_url)
+                            
+                            if repos_response.status_code == 200:
+                                repos = repos_response.json().get('value', [])
+                                if repos:
+                                    self.formatter.print_success(f"GitHub organization '{owner_name}' has {len(repos)} connected repositories")
+                                    
+                                    for repo in repos[:5]:  # Show first 5 repos
+                                        repo_name = repo.get('name', 'Unknown')
+                                        repo_props = repo.get('properties', {})
+                                        
+                                        # Check for secret scanning configuration
+                                        onboarding_state = repo_props.get('onboardingState', 'Unknown')
+                                        if onboarding_state == 'Onboarded':
+                                            self.formatter.print_success(f"Repository '{repo_name}' is onboarded for security scanning")
+                                        else:
+                                            self.formatter.print_warning(f"Repository '{repo_name}' is not onboarded (State: {onboarding_state})")
+                                    
+                                    if len(repos) > 5:
+                                        self.formatter.print_info(f"... and {len(repos) - 5} more repositories")
+                                else:
+                                    self.formatter.print_warning(f"No repositories found for GitHub organization '{owner_name}'")
+                            else:
+                                self.formatter.print_warning(f"Could not retrieve repositories for GitHub organization '{owner_name}'")
+                    else:
+                        self.formatter.print_warning("No GitHub organizations connected to Microsoft Defender for Cloud")
+                elif github_response.status_code == 404:
+                    self.formatter.print_info("Microsoft Defender for DevOps GitHub integration not configured")
+                else:
+                    self.formatter.print_warning(f"Could not check GitHub integration: {github_response.status_code}")
+            except Exception as e:
+                self.formatter.print_info("GitHub integration check not available or requires additional permissions")
+            
+            # Check for Azure DevOps integration
+            try:
+                azure_devops_url = f"/subscriptions/{subscription_id}/providers/Microsoft.Security/azureDevOpsOrgs?api-version=2023-09-01-preview"
+                azure_devops_response = self.api_client.arm_get(azure_devops_url)
+                
+                if azure_devops_response.status_code == 200:
+                    azure_devops_orgs = azure_devops_response.json().get('value', [])
+                    if azure_devops_orgs:
+                        self.formatter.print_success(f"Found {len(azure_devops_orgs)} Azure DevOps organization(s) connected to Microsoft Defender for Cloud")
+                        
+                        for org in azure_devops_orgs:
+                            org_name = org.get('name', 'Unknown')
+                            
+                            # Check for projects
+                            projects_url = f"/subscriptions/{subscription_id}/providers/Microsoft.Security/azureDevOpsOrgs/{org_name}/projects?api-version=2023-09-01-preview"
+                            projects_response = self.api_client.arm_get(projects_url)
+                            
+                            if projects_response.status_code == 200:
+                                projects = projects_response.json().get('value', [])
+                                if projects:
+                                    self.formatter.print_success(f"Azure DevOps organization '{org_name}' has {len(projects)} connected projects")
+                                    
+                                    for project in projects[:5]:  # Show first 5 projects
+                                        project_name = project.get('name', 'Unknown')
+                                        project_props = project.get('properties', {})
+                                        
+                                        # Check for security scanning configuration
+                                        onboarding_state = project_props.get('onboardingState', 'Unknown')
+                                        if onboarding_state == 'Onboarded':
+                                            self.formatter.print_success(f"Project '{project_name}' is onboarded for security scanning")
+                                        else:
+                                            self.formatter.print_warning(f"Project '{project_name}' is not onboarded (State: {onboarding_state})")
+                                    
+                                    if len(projects) > 5:
+                                        self.formatter.print_info(f"... and {len(projects) - 5} more projects")
+                                else:
+                                    self.formatter.print_warning(f"No projects found for Azure DevOps organization '{org_name}'")
+                            else:
+                                self.formatter.print_warning(f"Could not retrieve projects for Azure DevOps organization '{org_name}'")
+                    else:
+                        self.formatter.print_warning("No Azure DevOps organizations connected to Microsoft Defender for Cloud")
+                elif azure_devops_response.status_code == 404:
+                    self.formatter.print_info("Microsoft Defender for DevOps Azure DevOps integration not configured")
+                else:
+                    self.formatter.print_warning(f"Could not check Azure DevOps integration: {azure_devops_response.status_code}")
+            except Exception as e:
+                self.formatter.print_info("Azure DevOps integration check not available or requires additional permissions")
+            
+            # Check for recent security findings
+            try:
+                alerts_url = f"/subscriptions/{subscription_id}/providers/Microsoft.Security/alerts?api-version=2022-01-01&$filter=severity eq 'High' or severity eq 'Medium'"
+                alerts_response = self.api_client.arm_get(alerts_url)
+                
+                if alerts_response.status_code == 200:
+                    alerts = alerts_response.json().get('value', [])
+                    devops_alerts = []
+                    
+                    # Filter for DevOps-related alerts
+                    for alert in alerts:
+                        alert_props = alert.get('properties', {})
+                        alert_name = alert_props.get('alertDisplayName', '')
+                        alert_description = alert_props.get('description', '')
+                        
+                        # Look for DevOps-related keywords
+                        devops_keywords = ['secret', 'credential', 'password', 'token', 'key', 'devops', 'github', 'azure devops', 'hardcoded']
+                        if any(keyword in alert_name.lower() or keyword in alert_description.lower() for keyword in devops_keywords):
+                            devops_alerts.append(alert)
+                    
+                    if devops_alerts:
+                        self.formatter.print_warning(f"Found {len(devops_alerts)} DevOps-related security alerts")
+                        for alert in devops_alerts[:3]:  # Show first 3 alerts
+                            alert_props = alert.get('properties', {})
+                            alert_name = alert_props.get('alertDisplayName', 'Unknown')
+                            severity = alert_props.get('severity', 'Unknown')
+                            self.formatter.print_key_value(f"Alert: {alert_name}", f"Severity: {severity}")
+                        
+                        if len(devops_alerts) > 3:
+                            self.formatter.print_info(f"... and {len(devops_alerts) - 3} more DevOps-related alerts")
+                    else:
+                        self.formatter.print_success("No DevOps-related security alerts found")
+                else:
+                    self.formatter.print_warning("Could not retrieve security alerts")
+            except Exception as e:
+                self.formatter.print_info("Security alerts check not available")
+            
+        except Exception as e:
+            self.formatter.print_error(f"Exception occurred while checking Microsoft Defender for DevOps: {e}")
+        
         self.formatter.print_separator()

@@ -272,7 +272,7 @@ The script uses the following API endpoints:
 ## 4. Project Structure
 
 ```
-SecurityPolicyPrinter_v3/
+SecurityPolicyPrinter/
 ├── main.py                 # Main entry point and orchestration
 ├── security_functions.py   # All security policy check functions
 ├── helpers.py             # Configuration, API client, and formatting utilities
@@ -283,50 +283,7 @@ SecurityPolicyPrinter_v3/
 └── README.md             # This file
 ```
 
-## 5. New Features in v3
-
-### Enhanced Audit Record Collection
-The new `check_sentinel_comprehensive_audit_records()` function provides comprehensive audit records with all required non-repudiation attributes:
-
-- **Sentinel Administrative Actions**: Tracks all administrative operations on Sentinel resources
-- **Log Analytics Query Auditing**: Monitors all queries executed against the workspace
-- **Windows Command Execution**: Captures detailed process creation events
-- **Non-repudiation Verification**: Explicitly maps all required attributes to data sources
-
-### Improved Token Management
-- Automatic token refresh and caching
-- Centralized token management in `TokenManager` class
-- Seamless integration with Azure Identity library
-
-### Modular Architecture
-- Separated concerns across multiple modules
-- Reusable components for API interactions
-- Centralized configuration management
-
-### Enhanced Output Formatting
-- Consistent formatting across all functions
-- Clear success/failure indicators
-- Detailed evidence collection for compliance reporting
-
-### Network Security Enhancements
-- ASG (Application Security Group) boundary protection checks
-- Non-secure protocol restriction validation
-- Inbound internet traffic restriction verification
-- Comprehensive NSG port analysis
-
-## 6. Compliance Evidence
-
-This tool provides comprehensive evidence for FedRAMP Moderate compliance by:
-
-- **Non-repudiation**: Full audit trails with complete command and query recording
-- **Access Control**: Verification of authentication and authorization policies
-- **Monitoring**: Evidence of security monitoring and alerting capabilities
-- **Configuration Management**: Validation of security policy configurations
-- **Incident Response**: Documentation of security incident handling capabilities
-- **Network Security**: Evidence of boundary protection and traffic filtering
-- **Identity Management**: Verification of privileged access controls and lifecycle management
-
-## 7. Troubleshooting
+## 5. Troubleshooting
 
 ### Common Issues
 
@@ -340,11 +297,7 @@ This tool provides comprehensive evidence for FedRAMP Moderate compliance by:
 
 5. **403 Errors**: If you encounter 403 errors for specific functions, ensure the required Microsoft Graph API permissions are granted and admin consent is provided.
 
-### Debug Mode
-
-To enable detailed error logging, modify the configuration to increase verbosity or check the console output for detailed error messages.
-
-## 8. Contributing
+## 6. Contributing
 
 When adding new security checks:
 
@@ -354,12 +307,6 @@ When adding new security checks:
 4. Add appropriate error handling
 5. Update this README with new functionality
 
-## 9. Version History
-
-- **v3.0**: Enhanced audit record collection, modular architecture, improved token management, network security enhancements
-- **v2.0**: Additional security controls and improved error handling
-- **v1.0**: Initial release with basic security policy checks
-
-## 10. License
+## 7. License
 
 This project is designed for internal compliance and security assessment purposes. Please ensure compliance with your organization's security policies when using this tool. 
