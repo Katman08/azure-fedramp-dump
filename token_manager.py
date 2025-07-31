@@ -40,9 +40,36 @@ class TokenManager:
             
             credential = ClientSecretCredential(tenant_id, client_id, client_secret)
             
+            # Use config setting to determine environment
+            is_government = getattr(self.config, 'is_government_cloud', False)
+            
+            # Fallback: check base URLs if config setting is not available
+            if not hasattr(self.config, 'is_government_cloud'):
+                arm_base_url = getattr(self.config, 'arm_base_url', 'https://management.azure.com')
+                graph_base_url = getattr(self.config, 'graph_base_url', 'https://graph.microsoft.com/v1.0')
+                is_government = (
+                    "usgovcloudapi.net" in arm_base_url or
+                    "graph.microsoft.us" in graph_base_url
+                )
+            
+            if is_government:
+                # Government cloud scopes
+                arm_scope = "https://management.usgovcloudapi.net/.default"
+                graph_scope = "https://graph.microsoft.us/.default"
+                log_analytics_scope = "https://api.loganalytics.us/.default"
+                print("==== GOVERNMENT CLOUD DETECTED ====")
+                print("Using government cloud scopes")
+                print("------")
+            else:
+                # Commercial cloud scopes
+                arm_scope = "https://management.azure.com/.default"
+                graph_scope = "https://graph.microsoft.com/.default"
+                log_analytics_scope = "https://api.loganalytics.io/.default"
+            
             self.tokens = {
-                "arm": credential.get_token("https://management.azure.com/.default").token,
-                "graph": credential.get_token("https://graph.microsoft.com/.default").token,
+                "arm": credential.get_token(arm_scope).token,
+                "graph": credential.get_token(graph_scope).token,
+                "log_analytics": credential.get_token(log_analytics_scope).token,
                 "expires_at": (datetime.now() + timedelta(hours=1)).isoformat()
             }
             

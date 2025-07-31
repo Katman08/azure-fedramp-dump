@@ -10,8 +10,10 @@ import json
 import os
 import sys
 import requests
+import urllib.parse
 from datetime import datetime
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
+from azure.identity import ClientSecretCredential
 
 
 class Tee:
@@ -177,7 +179,7 @@ class Config:
     def __init__(self, subscription_id: str, resource_group: str, workspace_name: str,
                  graph_base_url: str, arm_base_url: str, max_items: int, output_file: str,
                  tenant_id: str | None = None, client_id: str | None = None, client_secret: str | None = None,
-                 max_subitems: int = 10):
+                 max_subitems: int = 10, is_government_cloud: bool = False):
         self.subscription_id = subscription_id
         self.resource_group = resource_group
         self.workspace_name = workspace_name
@@ -189,6 +191,7 @@ class Config:
         self.client_id = client_id
         self.client_secret = client_secret
         self.max_subitems = max_subitems
+        self.is_government_cloud = is_government_cloud
     
     @classmethod
     def from_file(cls, config_file: str = "config.json") -> "Config":
@@ -213,6 +216,7 @@ class Config:
             "workspace_name": self.workspace_name,
             "graph_base_url": self.graph_base_url,
             "arm_base_url": self.arm_base_url,
+            "is_government_cloud": self.is_government_cloud,
             "max_items": self.max_items,
             "output_file": self.output_file,
             "tenant_id": self.tenant_id,
@@ -243,6 +247,7 @@ class APIClient:
     
     def __init__(self, tokens: Dict[str, str], config: Config):
         self.config = config
+        self.tokens = tokens  # Store the full tokens dict
         self.graph_token = tokens.get('graph', '')
         self.arm_token = tokens.get('arm', '')
         
@@ -276,18 +281,80 @@ class APIClient:
         url = f"{self.config.arm_base_url}{endpoint}"
         return requests.post(url, headers=self.arm_headers, json=data)
     
-    def log_analytics_query(self, query: str, timespan: str = "P7D") -> requests.Response:
-        """Execute a Log Analytics query"""
-        endpoint = f"/subscriptions/{self.config.subscription_id}/resourceGroups/{self.config.resource_group}/providers/Microsoft.OperationalInsights/workspaces/{self.config.workspace_name}/api/query"
+    def log_analytics_query(self, workspace_id: str, query: str, timespan: str = "P7D") -> requests.Response:
+        """Execute a Log Analytics query using the v1 API endpoint (api.loganalytics.io)"""
+        query_encoded = urllib.parse.quote(query)
+        timespan_encoded = urllib.parse.quote(timespan)
         
-        url = f"{self.config.arm_base_url}{endpoint}?api-version=2020-08-01"
+        # Use base URLs from config to determine environment
+        arm_base_url = getattr(self.config, 'arm_base_url', 'https://management.azure.com')
+        graph_base_url = getattr(self.config, 'graph_base_url', 'https://graph.microsoft.com/v1.0')
         
-        payload = {
-            "query": query,
-            "timespan": timespan
+        # Check if this is a government environment
+        is_government = (
+            "usgovcloudapi.net" in arm_base_url or
+            "graph.microsoft.us" in graph_base_url
+        )
+        
+        # Use cached Log Analytics token if available, otherwise get it on-demand
+        log_analytics_token = None
+        if 'log_analytics' in self.tokens:
+            log_analytics_token = self.tokens['log_analytics']
+        else:
+            # Fallback: get token on-demand
+            try:
+                credential = ClientSecretCredential(
+                    self.config.tenant_id, 
+                    self.config.client_id, 
+                    self.config.client_secret
+                )
+                
+                if is_government:
+                    log_analytics_scope = "https://api.loganalytics.us/.default"
+                else:
+                    log_analytics_scope = "https://api.loganalytics.io/.default"
+                
+                log_analytics_token = credential.get_token(log_analytics_scope).token
+            except Exception as e:
+                print(f"Failed to get Log Analytics token: {e}")
+                # Fallback to ARM token (may not work)
+                if is_government:
+                    url = f"https://api.loganalytics.us/v1/workspaces/{workspace_id}/query?query={query_encoded}&timespan={timespan_encoded}"
+                else:
+                    url = f"https://api.loganalytics.io/v1/workspaces/{workspace_id}/query?query={query_encoded}&timespan={timespan_encoded}"
+                return requests.get(url, headers=self.arm_headers)
+        
+        if is_government:
+            # Government cloud Log Analytics endpoint
+            url = f"https://api.loganalytics.us/v1/workspaces/{workspace_id}/query?query={query_encoded}&timespan={timespan_encoded}"
+        else:
+            # Commercial cloud Log Analytics endpoint
+            url = f"https://api.loganalytics.io/v1/workspaces/{workspace_id}/query?query={query_encoded}&timespan={timespan_encoded}"
+        
+        # Use Log Analytics token in headers
+        headers = {
+            "Authorization": f"Bearer {log_analytics_token}",
+            "Content-Type": "application/json"
         }
         
-        return requests.post(url, headers=self.arm_headers, json=payload)
+        response = requests.get(url, headers=headers)
+        
+        # Debug logging for Log Analytics queries (only for unexpected errors)
+        if response.status_code not in [200, 204, 400]:
+            print(f"Log Analytics query failed: {response.status_code}")
+            print(f"Response: {response.text}")
+        
+        return response
+    
+    def get_workspace_id(self, subscription_id: str, resource_group: str, workspace_name: str) -> str:
+        """Get the workspace ID (customerId) from the ARM API"""
+        endpoint = f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.OperationalInsights/workspaces/{workspace_name}?api-version=2022-10-01"
+        response = self.arm_get(endpoint)
+        
+        if response.status_code == 200:
+            return response.json()['properties']['customerId']
+        else:
+            raise Exception(f"Failed to get workspace ID: {response.status_code}")
     
     def check_response(self, response: requests.Response, operation: str) -> bool:
         """Check if an API response was successful and handle common errors"""

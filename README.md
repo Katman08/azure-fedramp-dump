@@ -169,7 +169,7 @@ The script will automatically:
 - VM OS Auth on Unlock
 
 ### Log Analytics and RBAC
-- Log Analytics Retention Settings
+- Log Analytics Workspace Retention & Immutability Settings
 - Workspace RBAC
 - Credential Distribution Audit Events
 - CIS L1 Initiative Assignment
@@ -190,6 +190,7 @@ Microsoft Graph API permissions (Application permissions):
 - `IdentityRiskEvent.Read.All`
 - `DeviceManagementConfiguration.Read.All`
 - `DeviceManagementManagedDevices.Read.All`
+- `DeviceManagementServiceConfig.Read.All`
 - `RoleManagement.Read.Directory`
 - `User.Read.All`
 - `Group.Read.All`

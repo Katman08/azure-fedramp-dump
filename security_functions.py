@@ -5,9 +5,9 @@ Security Policy Printer v3 - Security Functions Module
 This module contains all security policy checking functions for Microsoft Entra ID and Azure.
 """
 
-from typing import Dict, Any, Optional, List
-import datetime
+from typing import Dict, Any, Optional
 from helpers import APIClient, Formatter, Config
+import datetime
 
 
 class SecurityFunctions:
@@ -17,6 +17,34 @@ class SecurityFunctions:
         self.api_client = api_client
         self.formatter = formatter
         self.config = config
+    
+    def _handle_pim_license_error(self, response):
+        """Helper method to handle PIM license requirement errors gracefully."""
+        if response.status_code == 400:
+            try:
+                error_data = response.json()
+                if error_data.get('error', {}).get('code') == 'AadPremiumLicenseRequired':
+                    self.formatter.print_warning("Microsoft Entra ID P2 or Microsoft Entra ID Governance license is required for PIM functionality.")
+                    self.formatter.print_info("PIM features are only available with Azure AD Premium P2 or Microsoft Entra ID Governance licenses.")
+                    self.formatter.print_info("Consider upgrading your license to enable Privileged Identity Management features.")
+                    return True  # Indicates license error was handled
+            except:
+                pass  # If we can't parse the error, continue with normal error handling
+        return False  # No license error handled
+    
+    def _handle_identity_protection_license_error(self, response):
+        """Helper method to handle Identity Protection license requirement errors gracefully."""
+        if response.status_code == 403:
+            try:
+                error_data = response.json()
+                if error_data.get('error', {}).get('message', '').find('not licensed') != -1:
+                    self.formatter.print_warning("Your tenant is not licensed for Identity Protection features.")
+                    self.formatter.print_info("This feature requires Microsoft Entra ID P2 (Azure AD Premium P2) license.")
+                    self.formatter.print_info("Identity Protection features are not available without the required license.")
+                    return True  # Indicates license error was handled
+            except:
+                pass  # If we can't parse the error, continue with normal error handling
+        return False  # No license error handled
     
     def check_smart_lockout_settings(self):
         """Check Smart Lockout configuration"""
@@ -101,7 +129,15 @@ class SecurityFunctions:
         try:
             response = self.api_client.graph_get("/identity/conditionalAccess/policies")
             if self.api_client.check_response(response, "Conditional Access Policies"):
-                policies = response.json().get('value', [])
+                # Add null check for response.json()
+                response_data = response.json()
+                if response_data is None:
+                    self.formatter.print_error("Failed to parse response data - response is None")
+                    return
+                
+                policies = response_data.get('value', [])
+                if policies is None:
+                    policies = []
                 
                 # Track different types of policies found
                 compliance_policies = []
@@ -109,16 +145,33 @@ class SecurityFunctions:
                 mobile_blocking_policies = []
                 
                 for policy in policies:
+                    if not isinstance(policy, dict):
+                        continue
+                        
                     if policy.get('state') != 'enabled':
                         continue
                         
                     policy_name = policy.get('displayName', 'Unnamed Policy')
+                    if policy_name is None:
+                        policy_name = 'Unnamed Policy'
+                        
                     conditions = policy.get('conditions', {})
+                    if conditions is None:
+                        conditions = {}
+                        
                     grant_controls = policy.get('grantControls', {})
+                    if grant_controls is None:
+                        grant_controls = {}
+                        
                     built_in_controls = grant_controls.get('builtInControls', [])
+                    if built_in_controls is None:
+                        built_in_controls = []
                     
                     # Check for device compliance requirements
                     device_platforms = conditions.get('devicePlatforms', {})
+                    if device_platforms is None:
+                        device_platforms = {}
+                        
                     if device_platforms.get('includeDevices') == 'all' or 'requireDeviceCompliance' in built_in_controls:
                         compliance_policies.append(policy)
                     
@@ -128,7 +181,13 @@ class SecurityFunctions:
                     
                     # Check for mobile device blocking
                     include_platforms = device_platforms.get('includeDevicePlatforms', [])
+                    if include_platforms is None:
+                        include_platforms = []
+                        
                     exclude_platforms = device_platforms.get('excludeDevicePlatforms', [])
+                    if exclude_platforms is None:
+                        exclude_platforms = []
+                        
                     mobile_platforms = ['android', 'ios', 'windowsPhone']
                     
                     blocks_mobile = False
@@ -173,9 +232,20 @@ class SecurityFunctions:
                         self.formatter.print_key_value("State", policy.get('state', 'Unknown'))
                         
                         conditions = policy.get('conditions', {})
-                        device_platforms = conditions.get('devicePlatforms', {})
-                        include_platforms = device_platforms.get('includeDevicePlatforms', [])
-                        exclude_platforms = device_platforms.get('excludeDevicePlatforms', [])
+                        if conditions is None:
+                            self.formatter.print_warning("No conditions found in policy")
+                        else:
+                            device_platforms = conditions.get('devicePlatforms', {})
+                            if device_platforms is None:
+                                device_platforms = {}
+                                
+                            include_platforms = device_platforms.get('includeDevicePlatforms', [])
+                            if include_platforms is None:
+                                include_platforms = []
+                                
+                            exclude_platforms = device_platforms.get('excludeDevicePlatforms', [])
+                            if exclude_platforms is None:
+                                exclude_platforms = []
                         
                         if include_platforms:
                             self.formatter.print_key_value("Include Platforms", ', '.join(include_platforms))
@@ -183,16 +253,22 @@ class SecurityFunctions:
                             self.formatter.print_key_value("Exclude Platforms", ', '.join(exclude_platforms))
                         
                         grant_controls = policy.get('grantControls', {})
-                        built_in_controls = grant_controls.get('builtInControls', [])
-                        self.formatter.print_key_value("Grant Controls", ', '.join(built_in_controls))
+                        if grant_controls is None:
+                            self.formatter.print_warning("No grant controls found in policy")
+                        else:
+                            built_in_controls = grant_controls.get('builtInControls', [])
+                            self.formatter.print_key_value("Grant Controls", ', '.join(built_in_controls))
                         
                         users = conditions.get('users', {})
-                        include_users = users.get('includeUsers', [])
-                        include_groups = users.get('includeGroups', [])
-                        if include_users:
-                            self.formatter.print_key_value("Include Users", f"{len(include_users)} users")
-                        if include_groups:
-                            self.formatter.print_key_value("Include Groups", f"{len(include_groups)} groups")
+                        if users is None:
+                            self.formatter.print_warning("No users found in policy")
+                        else:
+                            include_users = users.get('includeUsers', [])
+                            include_groups = users.get('includeGroups', [])
+                            if include_users:
+                                self.formatter.print_key_value("Include Users", f"{len(include_users)} users")
+                            if include_groups:
+                                self.formatter.print_key_value("Include Groups", f"{len(include_groups)} groups")
                         self.formatter.print_separator()
                 else:
                     self.formatter.print_warning("No Conditional Access policies found that explicitly block mobile devices.")
@@ -225,15 +301,16 @@ class SecurityFunctions:
     def _get_custom_smart_lockout_settings(self) -> Optional[dict]:
         """Get custom smart lockout settings"""
         try:
-            response = self.api_client.graph_get("/domains")
-            if self.api_client.check_response(response, "Domain Settings"):
-                domains = response.json().get('value', [])
-                for domain in domains:
-                    if domain.get('isDefault'):
-                        domain_id = domain.get('id', '')
-                        auth_response = self.api_client.graph_get(f"/domains/{domain_id}/authenticationConfiguration")
-                        if self.api_client.check_response(auth_response, "Domain Authentication Configuration"):
-                            return auth_response.json()
+            # Use the correct endpoint for authentication methods policy
+            auth_response = self.api_client.graph_get("/policies/authenticationMethodsPolicy")
+            if self.api_client.check_response(auth_response, "Authentication Methods Policy"):
+                return auth_response.json()
+            
+            # Fallback: try security defaults policy
+            security_response = self.api_client.graph_get("/policies/identitySecurityDefaultsEnforcementPolicy")
+            if self.api_client.check_response(security_response, "Security Defaults Policy"):
+                return security_response.json()
+                
         except Exception as e:
             print(f"Error getting custom smart lockout settings: {e}")
         return None
@@ -270,41 +347,172 @@ class SecurityFunctions:
             "MICROSOFT GRAPH API PERMISSIONS CHECK",
             "This function checks and prints which Microsoft Graph API permissions are available with the current access token. It attempts to call key endpoints and reports which ones succeed or fail, evidencing the effective permissions for compliance and troubleshooting."
         )
+        
         test_endpoints = [
-            ("/policies/identitySecurityDefaultsEnforcementPolicy", "Security Defaults Policy"),
-            ("/policies/authenticationMethodsPolicy", "Authentication Methods Policy"),
-            ("/identity/conditionalAccess/policies", "Conditional Access Policies"),
-            ("/directorySettings", "Directory Settings (Password Protection)"),
-            ("/deviceManagement/deviceConfigurations", "Intune Device Configurations"),
-            ("/deviceManagement/managedDevices", "Intune Managed Devices"),
-            ("/deviceManagement", "Intune Service Config"),
-            ("/policies", "All Policies"),
-            ("/domains", "Domains"),
-            ("/directoryRoles", "Directory Roles")
+            # Policy.Read.All permissions
+            ("/policies/identitySecurityDefaultsEnforcementPolicy", "Security Defaults Policy", "Policy.Read.All"),
+            ("/policies/authenticationMethodsPolicy", "Authentication Methods Policy", "Policy.Read.All"),
+            ("/policies", "All Policies", "Policy.Read.All"),
+            
+            # Directory.Read.All permissions
+            ("/domains", "Domains", "Directory.Read.All"),
+            ("/directoryRoles", "Directory Roles", "Directory.Read.All"),
+            ("/directorySettings", "Directory Settings", "Directory.Read.All"),
+            
+            # IdentityRiskyUser.Read.All permissions
+            ("/identityProtection/riskyUsers", "Risky Users", "IdentityRiskyUser.Read.All"),
+            
+            # IdentityRiskEvent.Read.All permissions
+            ("/identityProtection/riskDetections", "Risk Detections", "IdentityRiskEvent.Read.All"),
+            
+            # DeviceManagementConfiguration.Read.All permissions
+            ("/deviceManagement/deviceConfigurations", "Intune Device Configurations", "DeviceManagementConfiguration.Read.All"),
+            
+            # DeviceManagementManagedDevices.Read.All permissions
+            ("/deviceManagement/managedDevices", "Intune Managed Devices", "DeviceManagementManagedDevices.Read.All"),
+            
+            # DeviceManagementServiceConfig.Read.All permissions
+            ("/deviceManagement", "Intune Service Config", "DeviceManagementServiceConfig.Read.All"),
+            ("/deviceManagement/deviceCompliancePolicies", "Intune Compliance Policies", "DeviceManagementServiceConfig.Read.All"),
+            
+            # RoleManagement.Read.Directory permissions
+            ("/roleManagement/directory/roleAssignmentSchedulePolicies", "PIM Role Assignment Policies", "RoleManagement.Read.Directory"),
+            ("/roleManagement/directory/roleEligibilitySchedulePolicies", "PIM Role Eligibility Policies", "RoleManagement.Read.Directory"),
+            ("/roleManagement/directory/roleAssignments", "PIM Role Assignments", "RoleManagement.Read.Directory"),
+            
+            # User.Read.All permissions
+            ("/users", "Users", "User.Read.All"),
+            ("/users?$top=1", "User Details", "User.Read.All"),
+            
+            # Group.Read.All permissions
+            ("/groups", "Groups", "Group.Read.All"),
+            ("/groups?$top=1", "Group Details", "Group.Read.All"),
+            
+            # AuditLog.Read.All permissions
+            ("/auditLogs/directoryAudits", "Directory Audit Logs", "AuditLog.Read.All"),
+            ("/auditLogs/signIns", "Sign-in Logs", "AuditLog.Read.All"),
+            
+            # SecurityEvents.Read.All permissions
+            ("/security/events", "Security Events", "SecurityEvents.Read.All"),
+            
+            # SecurityIncident.Read.All permissions
+            ("/security/incidents", "Security Incidents", "SecurityIncident.Read.All"),
+            
+            # AccessReview.Read.All permissions
+            ("/identityGovernance/accessReviews/definitions", "Access Review Definitions", "AccessReview.Read.All"),
+            ("/identityGovernance/accessReviews/definitions?$top=1", "Access Review Details", "AccessReview.Read.All"),
+            
+            # PrivilegedAccess.Read.AzureAD permissions
+            ("/privilegedAccess/aadRoles/roleAssignments", "PIM Role Assignments", "PrivilegedAccess.Read.AzureAD"),
+            ("/privilegedAccess/aadRoles/roleEligibilitySchedules", "PIM Role Eligibility", "PrivilegedAccess.Read.AzureAD"),
+            
+            # LifecycleWorkflows.Read.All permissions
+            ("/identityGovernance/lifecycleWorkflows/workflows", "Lifecycle Workflows", "LifecycleWorkflows.Read.All"),
+            
+            # Conditional Access permissions
+            ("/identity/conditionalAccess/policies", "Conditional Access Policies", "Policy.Read.All"),
+            ("/identity/conditionalAccess/templates", "Conditional Access Templates", "Policy.Read.All"),
+            
+            # Additional security-related endpoints
+            ("/security/alerts", "Security Alerts", "SecurityEvents.Read.All"),
+            ("/security/secureScores", "Secure Scores", "SecurityEvents.Read.All"),
+            ("/security/secureScoreControlProfiles", "Secure Score Control Profiles", "SecurityEvents.Read.All")
         ]
+        
         working = []
         failed = []
-        for endpoint, description in test_endpoints:
+        permission_summary = {}
+        
+        for endpoint, description, required_permission in test_endpoints:
             try:
                 response = self.api_client.graph_get(endpoint)
                 if response.status_code == 200:
-                    working.append((endpoint, description, response.status_code))
-                    self.formatter.print_success(f"{description}: {response.status_code}")
+                    working.append((endpoint, description, response.status_code, required_permission))
+                    self.formatter.print_success(f"{description}: {response.status_code} (Permission: {required_permission})")
+                    
+                    # Track permission success
+                    if required_permission not in permission_summary:
+                        permission_summary[required_permission] = {"success": 0, "failed": 0}
+                    permission_summary[required_permission]["success"] += 1
+                    
                 else:
-                    failed.append((endpoint, description, response.status_code, response.text))
-                    self.formatter.print_error(f"{description}: {response.status_code}")
+                    failed.append((endpoint, description, response.status_code, required_permission, response.text))
+                    self.formatter.print_error(f"{description}: {response.status_code} (Permission: {required_permission})")
+                    
+                    # Track permission failure
+                    if required_permission not in permission_summary:
+                        permission_summary[required_permission] = {"success": 0, "failed": 0}
+                    permission_summary[required_permission]["failed"] += 1
+                    
             except Exception as e:
-                failed.append((endpoint, description, "Exception", str(e)))
-                self.formatter.print_error(f"{description}: Exception - {e}")
-        self.formatter.print_subsection("SUMMARY")
+                failed.append((endpoint, description, "Exception", required_permission, str(e)))
+                self.formatter.print_error(f"{description}: Exception - {e} (Permission: {required_permission})")
+                
+                # Track permission failure
+                if required_permission not in permission_summary:
+                    permission_summary[required_permission] = {"success": 0, "failed": 0}
+                permission_summary[required_permission]["failed"] += 1
+        
+        # Summary by permission
+        self.formatter.print_subsection("PERMISSION SUMMARY")
+        for permission, counts in permission_summary.items():
+            total = counts["success"] + counts["failed"]
+            if counts["failed"] == 0:
+                self.formatter.print_success(f"{permission}: {counts['success']}/{total} endpoints working")
+            elif counts["success"] == 0:
+                self.formatter.print_error(f"{permission}: {counts['failed']}/{total} endpoints failed")
+            else:
+                self.formatter.print_warning(f"{permission}: {counts['success']}/{total} working, {counts['failed']}/{total} failed")
+        
+        # Detailed summary
+        self.formatter.print_subsection("DETAILED SUMMARY")
         if working:
             self.formatter.print_success("WORKING ENDPOINTS:")
-            for endpoint, description, status in working:
-                self.formatter.print_list_item(f"{description} ({endpoint})")
+            for endpoint, description, status, permission in working:
+                self.formatter.print_list_item(f"{description} ({endpoint}) - {permission}")
+        
         if failed:
             self.formatter.print_error("FAILED ENDPOINTS:")
-            for endpoint, description, status, error in failed:
-                self.formatter.print_list_item(f"{description} ({endpoint}): {status}")
+            for endpoint, description, status, permission, error in failed:
+                self.formatter.print_list_item(f"{description} ({endpoint}) - {permission}: {status}")
+        
+        # Compliance assessment
+        self.formatter.print_subsection("COMPLIANCE ASSESSMENT")
+        required_permissions = [
+            "Policy.Read.All", "Directory.Read.All", "IdentityRiskyUser.Read.All", 
+            "IdentityRiskEvent.Read.All", "DeviceManagementConfiguration.Read.All",
+            "DeviceManagementManagedDevices.Read.All", "DeviceManagementServiceConfig.Read.All",
+            "RoleManagement.Read.Directory", "User.Read.All", "Group.Read.All",
+            "AuditLog.Read.All", "SecurityEvents.Read.All", "SecurityIncident.Read.All",
+            "AccessReview.Read.All", "PrivilegedAccess.Read.AzureAD", "LifecycleWorkflows.Read.All"
+        ]
+        
+        missing_permissions = []
+        partial_permissions = []
+        
+        for permission in required_permissions:
+            if permission not in permission_summary:
+                missing_permissions.append(permission)
+            elif permission_summary[permission]["failed"] > 0:
+                if permission_summary[permission]["success"] == 0:
+                    missing_permissions.append(permission)
+                else:
+                    partial_permissions.append(permission)
+        
+        if not missing_permissions and not partial_permissions:
+            self.formatter.print_success("✓ ALL REQUIRED PERMISSIONS ARE WORKING")
+        else:
+            if missing_permissions:
+                self.formatter.print_error("✗ MISSING PERMISSIONS:")
+                for permission in missing_permissions:
+                    self.formatter.print_list_item(f"{permission} - No endpoints working")
+            
+            if partial_permissions:
+                self.formatter.print_warning("⚠️  PARTIAL PERMISSIONS:")
+                for permission in partial_permissions:
+                    counts = permission_summary[permission]
+                    self.formatter.print_list_item(f"{permission} - {counts['success']} working, {counts['failed']} failed")
+        
         self.formatter.print_separator() 
 
     def check_intune_compliance_policy(self):
@@ -740,7 +948,8 @@ class SecurityFunctions:
                 for status, count in status_count.items():
                     self.formatter.print_key_value(f"Status: {status}", count)
                 self.formatter.print_subsection("Recent Incidents")
-                for inc in incidents[:5]:
+                max_subitems = getattr(self.config, 'max_subitems', 10)
+                for inc in incidents[:max_subitems]:
                     props = inc.get('properties', {})
                     self.formatter.print_key_value("Title", props.get('title'))
                     self.formatter.print_key_value("Status", props.get('status'))
@@ -754,103 +963,6 @@ class SecurityFunctions:
         except Exception as e:
             self.formatter.print_error(f"Exception occurred: {e}")
         self.formatter.print_separator() 
-        
-    def check_group_membership(self):
-        """List all Microsoft Entra ID groups and the members assigned to each group, with a table of member details and their roles. List users not in any group separately. Limit number of groups displayed with max_subitems config."""
-        self.formatter.print_header(
-            "MICROSOFT ENTRA ID GROUP MEMBERSHIP",
-            "This function lists all Microsoft Entra ID groups and the members assigned to each group, with a table of member details and their roles. Users not part of any group are listed separately."
-        )
-        try:
-            max_items = getattr(self.config, 'max_lines', 100)
-            max_groups = getattr(self.config, 'max_subitems', 10)
-            # Get all groups
-            groups_response = self.api_client.graph_get(f"/groups?$top={max_groups}")
-            if groups_response.status_code != 200:
-                self.formatter.print_error(f"Failed to retrieve groups: {groups_response.status_code}")
-                return
-            groups = groups_response.json().get('value', [])
-            # Get all users
-            users_response = self.api_client.graph_get(f"/users?$top={max_items}")
-            if users_response.status_code != 200:
-                self.formatter.print_error(f"Failed to retrieve users: {users_response.status_code}")
-                return
-            users = users_response.json().get('value', [])
-            user_id_map = {u['id']: u for u in users}
-            user_groups_map = {u['id']: [] for u in users}
-            all_member_ids = set()
-            # For each group, print group and table of members (limit to max_groups)
-            for group in groups[:max_groups]:
-                group_id = group.get('id')
-                group_name = group.get('displayName')
-                self.formatter.print_section_header(f"Group: {group_name}")
-                members_response = self.api_client.graph_get(f"/groups/{group_id}/members?$top={max_items}")
-                if members_response.status_code != 200:
-                    self.formatter.print_error(f"Failed to retrieve members for group {group_name}")
-                    continue
-                members = members_response.json().get('value', [])
-                if not members:
-                    self.formatter.print_info("(No members assigned)")
-                    continue
-                table_rows = []
-                for m in members[:max_items]:
-                    member_id = m.get('id')
-                    all_member_ids.add(member_id)
-                    # Add this group to the user's groups
-                    if member_id in user_groups_map:
-                        user_groups_map[member_id].append(group_name)
-                    # Get roles for this member (directory roles)
-                    roles_response = self.api_client.graph_get(f"/users/{member_id}/memberOf?$top={max_items}")
-                    roles = []
-                    if roles_response.status_code == 200:
-                        roles = [r.get('displayName', '') for r in roles_response.json().get('value', []) if r.get('@odata.type', '').endswith('directoryRole')]
-                    # Metadata
-                    upn = m.get('userPrincipalName', '')
-                    disp = m.get('displayName', '')
-                    mail = m.get('mail', '')
-                    typ = m.get('@odata.type', '').replace('#microsoft.graph.', '')
-                    table_rows.append([
-                        disp or upn or member_id,
-                        upn,
-                        mail,
-                        typ,
-                        ", ".join(roles) if roles else "(none)"
-                    ])
-                if len(members) > max_items:
-                    self.formatter.print_info(f"Table truncated to first {max_items} members.")
-                self.formatter.print_table([
-                    "Display Name", "User Principal Name", "Email", "Type", "Role(s)"
-                ], table_rows)
-                self.formatter.print_separator()
-            # Users not in any group
-            not_in_group = [u for u in users if u['id'] not in all_member_ids]
-            if not_in_group:
-                self.formatter.print_section_header("Users not in any group")
-                table_rows = []
-                for u in not_in_group[:max_items]:
-                    # Get roles for this user (directory roles)
-                    user_id = u.get('id')
-                    roles_response = self.api_client.graph_get(f"/users/{user_id}/memberOf?$top={max_items}")
-                    roles = []
-                    if roles_response.status_code == 200:
-                        roles = [r.get('displayName', '') for r in roles_response.json().get('value', []) if r.get('@odata.type', '').endswith('directoryRole')]
-                    
-                    table_rows.append([
-                        u.get('displayName', ''),
-                        u.get('userPrincipalName', ''),
-                        u.get('mail', ''),
-                        u.get('id', ''),
-                        ", ".join(roles) if roles else "(none)"
-                    ])
-                if len(not_in_group) > max_items:
-                    self.formatter.print_info(f"Table truncated to first {max_items} users.")
-                self.formatter.print_table([
-                    "Display Name", "User Principal Name", "Email", "Object ID", "Role(s)"], table_rows)
-            else:
-                self.formatter.print_info("All users are members of at least one group.")
-        except Exception as e:
-            self.formatter.print_error(f"Exception occurred: {e}")
-        self.formatter.print_separator()
 
     def check_blob_storage_audit_retention(self):
         """Check Azure Blob Storage audit retention configuration for 90 days searchable and 280 days archival."""
@@ -1758,7 +1870,8 @@ class SecurityFunctions:
         try:
             # Check for recent backup jobs in Recovery Services vaults
             if 'vaults' in locals() and vaults:
-                for vault in vaults[:3]:  # Check first 3 vaults
+                max_subitems = getattr(self.config, 'max_subitems', 10)
+                for vault in vaults[:max_subitems]:  # Check first max_subitems vaults
                     vault_name = vault.get('name', 'Unknown')
                     vault_id = vault.get('id', '')
                     
@@ -1773,7 +1886,7 @@ class SecurityFunctions:
                             self.formatter.print_success(f"Vault {vault_name}: Found {len(recent_jobs)} recent backup jobs")
                             
                             # Show recent job status
-                            for job in recent_jobs[:5]:  # Show first 5 jobs
+                            for job in recent_jobs[:max_subitems]:  # Show first max_subitems jobs
                                 job_props = job.get('properties', {})
                                 job_status = job_props.get('status', 'Unknown')
                                 job_type = job_props.get('backupManagementType', 'Unknown')
@@ -1907,38 +2020,6 @@ class SecurityFunctions:
             self.formatter.print_error(f"Exception occurred: {e}")
             self.formatter.print_separator()
 
-    def check_log_analytics_immutability(self):
-        """Check the immutability and data retention settings for a Log Analytics workspace."""
-        self.formatter.print_header(
-            "LOG ANALYTICS WORKSPACE IMMUTABILITY & RETENTION SETTINGS",
-            "This function checks the immutability and data retention settings for a Log Analytics workspace. It evidences log data protection against tampering, deletion, and ensures compliance with retention requirements."
-        )
-        workspace_name = getattr(self.config, 'workspace_name', None)
-        subscription_id = getattr(self.config, 'subscription_id', None)
-        resource_group = getattr(self.config, 'resource_group', None)
-        if not (workspace_name and subscription_id and resource_group):
-            self.formatter.print_error("workspace_name, subscription_id, and resource_group must be set in config.")
-            return
-        url = f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.OperationalInsights/workspaces/{workspace_name}?api-version=2022-10-01"
-        try:
-            response = self.api_client.arm_get(url)
-            if response.status_code == 200:
-                ws = response.json()
-                immutability = ws.get('properties', {}).get('immutableWorkspaceProperties', {})
-                if immutability:
-                    state = immutability.get('state', 'Not set')
-                    self.formatter.print_key_value("Immutability State", state)
-                else:
-                    self.formatter.print_warning("Immutability State: Not set or not available")
-                # Check and print data retention settings
-                retention_days = ws.get('properties', {}).get('retentionInDays', 'Not set')
-                self.formatter.print_key_value("Data Retention (Days)", retention_days)
-            else:
-                self.formatter.print_error(f"Failed to retrieve workspace settings: {response.status_code}")
-        except Exception as e:
-            self.formatter.print_error(f"Exception occurred while retrieving workspace settings: {e}")
-        self.formatter.print_separator()
-
     def check_sentinel_log_deletion_alert_rules(self):
         """Check for Sentinel analytic rules that alert on log deletion/purge activity."""
         self.formatter.print_header(
@@ -1981,6 +2062,11 @@ class SecurityFunctions:
         )
         try:
             response = self.api_client.graph_get("/roleManagement/directory/roleAssignmentSchedulePolicies")
+            
+            # Check for license requirement error
+            if self._handle_pim_license_error(response):
+                return
+            
             if response.status_code == 200:
                 policies = response.json().get('value', [])
                 if not policies:
@@ -2457,13 +2543,14 @@ class SecurityFunctions:
                                             for keyword in ['vulnerability', 'baseline', 'security configuration', 'compliance'])]
                 if vulnerability_assessments:
                     self.formatter.print_success(f"Found {len(vulnerability_assessments)} vulnerability and baseline assessments")
-                    for assessment in vulnerability_assessments[:5]:  # Show first 5
+                    max_subitems = getattr(self.config, 'max_subitems', 10)
+                    for assessment in vulnerability_assessments[:max_subitems]:  # Show first max_subitems
                         name = assessment.get('properties', {}).get('displayName', 'Unnamed')
                         status = assessment.get('properties', {}).get('status', {}).get('code', 'Unknown')
                         severity = assessment.get('properties', {}).get('metadata', {}).get('severity', 'N/A')
                         self.formatter.print_key_value(f"{name} (Severity: {severity})", status)
-                    if len(vulnerability_assessments) > 5:
-                        self.formatter.print_info(f"... and {len(vulnerability_assessments) - 5} more assessments")
+                    if len(vulnerability_assessments) > max_subitems:
+                        self.formatter.print_info(f"... and {len(vulnerability_assessments) - max_subitems} more assessments")
                 else:
                     self.formatter.print_error("No vulnerability assessments found")
             else:
@@ -2565,13 +2652,14 @@ class SecurityFunctions:
                 
                 if insider_threat_rules:
                     self.formatter.print_success(f"Found {len(insider_threat_rules)} insider threat related analytics rules:")
-                    for rule in insider_threat_rules[:5]:  # Show first 5
+                    max_subitems = getattr(self.config, 'max_subitems', 10)
+                    for rule in insider_threat_rules[:max_subitems]:  # Show first max_subitems
                         name = rule.get('name', 'Unnamed')
                         enabled = rule.get('properties', {}).get('enabled', False)
                         status = "Enabled" if enabled else "Disabled"
                         self.formatter.print_key_value(name, status)
-                    if len(insider_threat_rules) > 5:
-                        self.formatter.print_info(f"... and {len(insider_threat_rules) - 5} more rules")
+                    if len(insider_threat_rules) > max_subitems:
+                        self.formatter.print_info(f"... and {len(insider_threat_rules) - max_subitems} more rules")
                 else:
                     self.formatter.print_error("No insider threat related analytics rules found")
                 
@@ -2695,13 +2783,14 @@ class SecurityFunctions:
                     
                     if high_critical_alerts:
                         self.formatter.print_subsection("Recent High/Critical Alerts")
-                        for alert in high_critical_alerts[:5]:  # Show first 5
+                        max_subitems = getattr(self.config, 'max_subitems', 10)
+                        for alert in high_critical_alerts[:max_subitems]:  # Show first max_subitems
                             alert_name = alert.get('properties', {}).get('alertDisplayName', 'Unnamed')
                             severity = alert.get('properties', {}).get('severity', 'Unknown')
                             reported_time = alert.get('properties', {}).get('reportedTimeUtc', 'Unknown')
                             self.formatter.print_key_value(f"{alert_name} (Severity: {severity})", f"Reported: {reported_time}")
-                        if len(high_critical_alerts) > 5:
-                            self.formatter.print_info(f"... and {len(high_critical_alerts) - 5} more high/critical alerts")
+                        if len(high_critical_alerts) > max_subitems:
+                            self.formatter.print_info(f"... and {len(high_critical_alerts) - max_subitems} more high/critical alerts")
                 else:
                     self.formatter.print_success("No security alerts found from Microsoft Defender for Cloud")
             else:
@@ -2731,13 +2820,14 @@ class SecurityFunctions:
                     
                     if open_incidents:
                         self.formatter.print_subsection("Recent Open Incidents")
-                        for incident in open_incidents[:3]:  # Show first 3
+                        max_subitems = getattr(self.config, 'max_subitems', 10)
+                        for incident in open_incidents[:max_subitems]:  # Show first max_subitems
                             title = incident.get('properties', {}).get('title', 'Unnamed')
                             severity = incident.get('properties', {}).get('severity', 'Unknown')
                             created = incident.get('properties', {}).get('createdTimeUtc', 'Unknown')
                             self.formatter.print_key_value(f"{title} (Severity: {severity})", f"Created: {created}")
-                        if len(open_incidents) > 3:
-                            self.formatter.print_info(f"... and {len(open_incidents) - 3} more open incidents")
+                        if len(open_incidents) > max_subitems:
+                            self.formatter.print_info(f"... and {len(open_incidents) - max_subitems} more open incidents")
                 else:
                     self.formatter.print_success("No incidents found in Sentinel from Defender alerts")
             else:
@@ -2770,13 +2860,14 @@ class SecurityFunctions:
                     self.formatter.print_key_value("Active Reviews", len(active_reviews))
                     self.formatter.print_key_value("Completed Reviews", len(completed_reviews))
                     
-                    for review in reviews[:5]:  # Show first 5
+                    max_subitems = getattr(self.config, 'max_subitems', 10)
+                    for review in reviews[:max_subitems]:  # Show first max_subitems
                         display_name = review.get('displayName', 'Unnamed')
                         status = review.get('status', 'Unknown')
                         created_date = review.get('createdDateTime', 'Unknown')
                         self.formatter.print_key_value(f"{display_name} (Status: {status})", f"Created: {created_date}")
-                    if len(reviews) > 5:
-                        self.formatter.print_info(f"... and {len(reviews) - 5} more access reviews")
+                    if len(reviews) > max_subitems:
+                        self.formatter.print_info(f"... and {len(reviews) - max_subitems} more access reviews")
                 else:
                     self.formatter.print_error("No access review definitions found")
                     self.formatter.print_info("This is a critical gap for logical access review compliance")
@@ -2956,13 +3047,14 @@ class SecurityFunctions:
                             recent_instances = [i for i in instances if i.get('startDateTime', '') > '2024-01-01']
                             self.formatter.print_key_value("Recent instances (2024)", len(recent_instances))
                             
-                            for instance in instances[:3]:  # Show first 3
+                            max_subitems = getattr(self.config, 'max_subitems', 10)
+                            for instance in instances[:max_subitems]:  # Show first max_subitems
                                 start_date = instance.get('startDateTime', 'Unknown')
                                 end_date = instance.get('endDateTime', 'Unknown')
                                 status = instance.get('status', 'Unknown')
                                 self.formatter.print_key_value(f"Instance: {start_date} to {end_date}", f"Status: {status}")
-                            if len(instances) > 3:
-                                self.formatter.print_info(f"... and {len(instances) - 3} more instances")
+                            if len(instances) > max_subitems:
+                                self.formatter.print_info(f"... and {len(instances) - max_subitems} more instances")
                         else:
                             self.formatter.print_error("No access review instances found")
                     else:
@@ -2990,12 +3082,13 @@ class SecurityFunctions:
                 
                 if access_groups:
                     self.formatter.print_success(f"Found {len(access_groups)} potential access control groups:")
-                    for group in access_groups[:10]:  # Show first 10
+                    max_subitems = getattr(self.config, 'max_subitems', 10)
+                    for group in access_groups[:max_subitems]:  # Show first max_subitems
                         group_name = group.get('displayName', 'Unnamed')
                         member_count = group.get('members@odata.count', 'Unknown')
                         self.formatter.print_key_value(f"{group_name}", f"{member_count} members")
-                    if len(access_groups) > 10:
-                        self.formatter.print_info(f"... and {len(access_groups) - 10} more groups")
+                    if len(access_groups) > max_subitems:
+                        self.formatter.print_info(f"... and {len(access_groups) - max_subitems} more groups")
                 else:
                     self.formatter.print_error("No access control groups identified")
                     self.formatter.print_info("Consider creating groups for system access management")
@@ -3068,13 +3161,36 @@ class SecurityFunctions:
                     self.formatter.print_error("No automated offboarding workflows found")
                     self.formatter.print_info("This is a critical gap for timely access revocation")
                     self.formatter.print_info("Configure lifecycle workflows for automated offboarding")
-            elif response.status_code == 400 and 'Resource not found for the segment' in response.text:
-                self.formatter.print_error("Lifecycle Workflows are only available with Microsoft Entra ID P2 (Azure AD Premium P2)")
-                self.formatter.print_info("This feature requires Azure AD Premium P2 licensing")
+            elif response.status_code == 400:
+                # Check for specific license error messages
+                response_text = response.text.lower()
+                if 'insufficient license' in response_text or 'entra id governance license' in response_text:
+                    self.formatter.print_warning("Lifecycle Workflows require Microsoft Entra ID Governance license")
+                    self.formatter.print_info("This feature requires Microsoft Entra ID Governance (formerly Azure AD Premium P2) licensing")
+                    self.formatter.print_info("Manual offboarding processes can be implemented as an alternative for access revocation")
+                elif 'resource not found for the segment' in response_text:
+                    self.formatter.print_warning("Lifecycle Workflows are only available with Microsoft Entra ID P2 (Azure AD Premium P2)")
+                    self.formatter.print_info("This feature requires Azure AD Premium P2 licensing")
+                else:
+                    self.formatter.print_error(f"Failed to retrieve lifecycle workflows: {response.status_code}")
+                    self.formatter.print_info("Response: " + response.text)
+            elif response.status_code == 403:
+                # Check for specific license error messages in 403 responses
+                response_text = response.text.lower()
+                if 'insufficient license' in response_text or 'entra id governance license' in response_text:
+                    self.formatter.print_warning("Lifecycle Workflows require Microsoft Entra ID Governance license")
+                    self.formatter.print_info("This feature requires Microsoft Entra ID Governance (formerly Azure AD Premium P2) licensing")
+                    self.formatter.print_info("Manual offboarding processes can be implemented as an alternative for access revocation")
+                else:
+                    self.formatter.print_warning("Access denied to Lifecycle Workflows")
+                    self.formatter.print_info("This may be due to insufficient permissions or licensing requirements")
+                    self.formatter.print_info("Consider implementing manual offboarding processes as an alternative")
             else:
                 self.formatter.print_error(f"Failed to retrieve lifecycle workflows: {response.status_code}")
+                self.formatter.print_info("Response: " + response.text)
         except Exception as e:
-            self.formatter.print_error(f"Exception occurred: {e}")
+            self.formatter.print_error(f"Exception occurred while checking lifecycle workflows: {e}")
+            self.formatter.print_info("Consider implementing manual offboarding processes as an alternative")
         
         # 2. Check for 24-Hour Revocation Compliance Tracking
         self.formatter.print_subsection("24-HOUR REVOCATION COMPLIANCE TRACKING")
@@ -3088,8 +3204,7 @@ class SecurityFunctions:
                     self.formatter.print_success(f"Found {len(audit_events)} recent access revocation events")
                     
                     # Analyze timing of recent events (last 30 days)
-                    from datetime import datetime, timedelta
-                    thirty_days_ago = (datetime.now() - timedelta(days=30)).isoformat() + 'Z'
+                    thirty_days_ago = (datetime.now() - datetime.timedelta(days=30)).isoformat() + 'Z'
                     recent_events = [e for e in audit_events if e.get('activityDateTime', '') > thirty_days_ago]
                     
                     self.formatter.print_key_value("Recent events (last 30 days)", len(recent_events))
@@ -3097,13 +3212,14 @@ class SecurityFunctions:
                     
                     if recent_events:
                         self.formatter.print_subsection("Recent Access Revocation Events")
-                        for event in recent_events[:5]:  # Show first 5
+                        max_subitems = getattr(self.config, 'max_subitems', 10)
+                        for event in recent_events[:max_subitems]:  # Show first max_subitems
                             activity = event.get('activityDisplayName', 'Unknown')
                             timestamp = event.get('activityDateTime', 'Unknown')
                             target = event.get('targetResources', [{}])[0].get('displayName', 'Unknown')
                             self.formatter.print_key_value(f"{activity} for {target}", f"Timestamp: {timestamp}")
-                        if len(recent_events) > 5:
-                            self.formatter.print_info(f"... and {len(recent_events) - 5} more recent events")
+                        if len(recent_events) > max_subitems:
+                            self.formatter.print_info(f"... and {len(recent_events) - max_subitems} more recent events")
                 else:
                     self.formatter.print_success("No recent access revocation events found")
             elif response.status_code == 403:
@@ -3134,13 +3250,14 @@ class SecurityFunctions:
                     
                     if credential_events:
                         self.formatter.print_subsection("Recent Credential Revocation Events")
-                        for event in credential_events[:3]:  # Show first 3
+                        max_subitems = getattr(self.config, 'max_subitems', 10)
+                        for event in credential_events[:max_subitems]:  # Show first max_subitems
                             activity = event.get('activityDisplayName', 'Unknown')
                             timestamp = event.get('activityDateTime', 'Unknown')
                             target = event.get('targetResources', [{}])[0].get('displayName', 'Unknown')
                             self.formatter.print_key_value(f"{activity} for {target}", f"Timestamp: {timestamp}")
-                        if len(credential_events) > 3:
-                            self.formatter.print_info(f"... and {len(credential_events) - 3} more events")
+                        if len(credential_events) > max_subitems:
+                            self.formatter.print_info(f"... and {len(credential_events) - max_subitems} more events")
                 else:
                     self.formatter.print_success("No recent credential revocation events found")
             elif response.status_code == 403:
@@ -3169,13 +3286,14 @@ class SecurityFunctions:
                     
                     if role_events:
                         self.formatter.print_subsection("Recent Role Permission Revocation Events")
-                        for event in role_events[:3]:  # Show first 3
+                        max_subitems = getattr(self.config, 'max_subitems', 10)
+                        for event in role_events[:max_subitems]:  # Show first max_subitems
                             activity = event.get('activityDisplayName', 'Unknown')
                             timestamp = event.get('activityDateTime', 'Unknown')
                             target = event.get('targetResources', [{}])[0].get('displayName', 'Unknown')
                             self.formatter.print_key_value(f"{activity} for {target}", f"Timestamp: {timestamp}")
-                        if len(role_events) > 3:
-                            self.formatter.print_info(f"... and {len(role_events) - 3} more events")
+                        if len(role_events) > max_subitems:
+                            self.formatter.print_info(f"... and {len(role_events) - max_subitems} more events")
                 else:
                     self.formatter.print_success("No recent role permission revocation events found")
             elif response.status_code == 403:
@@ -3197,13 +3315,14 @@ class SecurityFunctions:
                     self.formatter.print_success(f"Found {len(sharepoint_events)} recent SharePoint/application update events")
                     self.formatter.print_info("These may indicate offboarding task completions")
                     
-                    for event in sharepoint_events[:3]:  # Show first 3
+                    max_subitems = getattr(self.config, 'max_subitems', 10)
+                    for event in sharepoint_events[:max_subitems]:  # Show first max_subitems
                         activity = event.get('activityDisplayName', 'Unknown')
                         timestamp = event.get('activityDateTime', 'Unknown')
                         target = event.get('targetResources', [{}])[0].get('displayName', 'Unknown')
                         self.formatter.print_key_value(f"{activity} for {target}", f"Timestamp: {timestamp}")
-                    if len(sharepoint_events) > 3:
-                        self.formatter.print_info(f"... and {len(sharepoint_events) - 3} more events")
+                    if len(sharepoint_events) > max_subitems:
+                        self.formatter.print_info(f"... and {len(sharepoint_events) - max_subitems} more events")
                 else:
                     self.formatter.print_error("No recent SharePoint/application update events found")
                     self.formatter.print_info("This may indicate limited SharePoint integration")
@@ -3226,13 +3345,14 @@ class SecurityFunctions:
                     self.formatter.print_success(f"Found {len(approval_events)} recent group management events")
                     self.formatter.print_info("These may indicate manager confirmations of access changes")
                     
-                    for event in approval_events[:3]:  # Show first 3
+                    max_subitems = getattr(self.config, 'max_subitems', 10)
+                    for event in approval_events[:max_subitems]:  # Show first max_subitems
                         activity = event.get('activityDisplayName', 'Unknown')
                         timestamp = event.get('activityDateTime', 'Unknown')
                         target = event.get('targetResources', [{}])[0].get('displayName', 'Unknown')
                         self.formatter.print_key_value(f"{activity} for {target}", f"Timestamp: {timestamp}")
-                    if len(approval_events) > 3:
-                        self.formatter.print_info(f"... and {len(approval_events) - 3} more events")
+                    if len(approval_events) > max_subitems:
+                        self.formatter.print_info(f"... and {len(approval_events) - max_subitems} more events")
                 else:
                     self.formatter.print_error("No recent group management events found")
                     self.formatter.print_info("This may indicate limited manager involvement in access management")
@@ -3264,13 +3384,14 @@ class SecurityFunctions:
                     
                     if open_incidents:
                         self.formatter.print_subsection("Open Access Revocation Incidents")
-                        for incident in open_incidents[:3]:  # Show first 3
+                        max_subitems = getattr(self.config, 'max_subitems', 10)
+                        for incident in open_incidents[:max_subitems]:  # Show first max_subitems
                             title = incident.get('properties', {}).get('title', 'Unnamed')
                             severity = incident.get('properties', {}).get('severity', 'Unknown')
                             created = incident.get('properties', {}).get('createdTimeUtc', 'Unknown')
                             self.formatter.print_key_value(f"{title} (Severity: {severity})", f"Created: {created}")
-                        if len(open_incidents) > 3:
-                            self.formatter.print_info(f"... and {len(open_incidents) - 3} more open incidents")
+                        if len(open_incidents) > max_subitems:
+                            self.formatter.print_info(f"... and {len(open_incidents) - max_subitems} more open incidents")
                 else:
                     self.formatter.print_success("No access revocation related incidents found")
             else:
@@ -3399,10 +3520,11 @@ class SecurityFunctions:
                 self.formatter.print_subsection("Attack Surface Reduction (ASR) Rules")
                 if asr_configs:
                     self.formatter.print_success(f"Found {len(asr_configs)} ASR rule configurations")
-                    for asr_config in asr_configs[:3]:  # Show first 3
+                    max_subitems = getattr(self.config, 'max_subitems', 10)
+                    for asr_config in asr_configs[:max_subitems]:  # Show first max_subitems
                         self.formatter.print_key_value(f"{asr_config['name']}", f"{asr_config['uri']} = {asr_config['value']}")
-                    if len(asr_configs) > 3:
-                        self.formatter.print_info(f"... and {len(asr_configs) - 3} more ASR configurations")
+                    if len(asr_configs) > max_subitems:
+                        self.formatter.print_info(f"... and {len(asr_configs) - max_subitems} more ASR configurations")
                 else:
                     self.formatter.print_error("No ASR rule configurations found")
                     self.formatter.print_info("ASR rules are critical for zero-day threat protection")
@@ -3547,12 +3669,28 @@ class SecurityFunctions:
             url = "/deviceManagement/deviceConfigurations"
             response = self.api_client.graph_get(url)
             if response.status_code == 200:
-                configs = response.json().get('value', [])
+                response_data = response.json()
+                if response_data is None:
+                    self.formatter.print_error("Failed to parse response data - response is None")
+                    return
+                    
+                configs = response_data.get('value', [])
+                if configs is None:
+                    configs = []
+                    
                 screen_lock_configs = []
                 
                 for device_config in configs:
+                    if not isinstance(device_config, dict):
+                        continue
+                        
                     oma_settings = device_config.get('omaSettings', [])
+                    if oma_settings is None:
+                        oma_settings = []
+                        
                     for setting in oma_settings:
+                        if not isinstance(setting, dict):
+                            continue
                         oma_uri = setting.get('omaUri', '')
                         # Check for screen lock related settings
                         if any(keyword in oma_uri.lower() for keyword in ['devicelock', 'screenlock', 'lock', 'inactivity']):
@@ -3586,12 +3724,28 @@ class SecurityFunctions:
             url = "/deviceManagement/deviceConfigurations"
             response = self.api_client.graph_get(url)
             if response.status_code == 200:
-                configs = response.json().get('value', [])
+                response_data = response.json()
+                if response_data is None:
+                    self.formatter.print_error("Failed to parse response data - response is None")
+                    return
+                    
+                configs = response_data.get('value', [])
+                if configs is None:
+                    configs = []
+                    
                 public_image_configs = []
                 
                 for device_config in configs:
+                    if not isinstance(device_config, dict):
+                        continue
+                        
                     oma_settings = device_config.get('omaSettings', [])
+                    if oma_settings is None:
+                        oma_settings = []
+                        
                     for setting in oma_settings:
+                        if not isinstance(setting, dict):
+                            continue
                         oma_uri = setting.get('omaUri', '')
                         # Check for lock screen image settings
                         if any(keyword in oma_uri.lower() for keyword in ['lockscreen', 'lockimage', 'wallpaper']):
@@ -3621,15 +3775,35 @@ class SecurityFunctions:
             url = "/identity/conditionalAccess/policies"
             response = self.api_client.graph_get(url)
             if response.status_code == 200:
-                policies = response.json().get('value', [])
+                response_data = response.json()
+                if response_data is None:
+                    self.formatter.print_error("Failed to parse response data - response is None")
+                    return
+                    
+                policies = response_data.get('value', [])
+                if policies is None:
+                    policies = []
+                    
                 reauth_policies = []
                 
                 for policy in policies:
+                    if not isinstance(policy, dict):
+                        continue
+                        
                     conditions = policy.get('conditions', {})
+                    if conditions is None:
+                        conditions = {}
+                        
                     grant_controls = policy.get('grantControls', {})
+                    if grant_controls is None:
+                        grant_controls = {}
                     
                     # Check for policies that require re-authentication
-                    if grant_controls.get('builtInControls') and 'requireReauthentication' in grant_controls.get('builtInControls', []):
+                    built_in_controls = grant_controls.get('builtInControls', [])
+                    if built_in_controls is None:
+                        built_in_controls = []
+                        
+                    if built_in_controls and 'requireReauthentication' in built_in_controls:
                         reauth_policies.append({
                             'name': policy.get('displayName', 'Unnamed'),
                             'state': policy.get('state', 'Unknown'),
@@ -3671,36 +3845,26 @@ class SecurityFunctions:
             self.formatter.print_error("workspace_name, subscription_id, and resource_group must be set in config.")
             return
         
-        try:            
-            # Calculate time range
-            from datetime import datetime, timedelta, timezone
-            end_time = datetime.now(timezone.utc)
-            start_time = end_time - timedelta(hours=hours_back)
+        try:
             
-            # KQL query to find error logs
+            # KQL query to find error logs (highly optimized for performance)
             kql_query = f"""
-            // Search for error logs across multiple tables
-            union 
-                (Event | where TimeGenerated >= datetime({start_time.isoformat()}) and TimeGenerated <= datetime({end_time.isoformat()}) | where EventLevelName == "Error" | project TimeGenerated, Computer, EventLog, EventID, EventLevelName, Message, Source),
-                (Syslog | where TimeGenerated >= datetime({start_time.isoformat()}) and TimeGenerated <= datetime({end_time.isoformat()}) | where SeverityLevel == "Error" | project TimeGenerated, Computer, Facility, SeverityLevel, SyslogMessage),
-                (AzureDiagnostics | where TimeGenerated >= datetime({start_time.isoformat()}) and TimeGenerated <= datetime({end_time.isoformat()}) | where Level == "Error" | project TimeGenerated, ResourceProvider, ResourceId, Level, Message),
-                (AzureActivity | where TimeGenerated >= datetime({start_time.isoformat()}) and TimeGenerated <= datetime({end_time.isoformat()}) | where Level == "Error" | project TimeGenerated, Caller, ResourceProvider, ResourceId, Level, StatusValue),
-                (SecurityEvent | where TimeGenerated >= datetime({start_time.isoformat()}) and TimeGenerated <= datetime({end_time.isoformat()}) | where EventID in (4625, 4647, 4670, 4771, 4776, 4778, 4779, 4964) | project TimeGenerated, Computer, EventID, EventData, Activity)
-            | order by TimeGenerated desc
+            // Start with the most common error sources first
+            Event 
+            | where TimeGenerated > ago({hours_back}h) 
+            | where EventLevelName == "Error" 
+            | project TimeGenerated, Computer, EventLog, EventID, EventLevelName, Message, Source, LogType = "Event"
             | take {max_lines}
             """
             
-            # Build the query URL
-            query_url = f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.OperationalInsights/workspaces/{workspace_name}/api/query?api-version=2020-08-01"
+            # Get workspace ID for the Log Analytics Query API
+            workspace_id = self.api_client.get_workspace_id(subscription_id, resource_group, workspace_name)
             
-            # Prepare the request body
-            request_body = {
-                "query": kql_query,
-                "timespan": f"{start_time.isoformat()}/{end_time.isoformat()}"
-            }
+            # Calculate timespan for the new API (e.g., "P24H" for 24 hours)
+            timespan = f"P{hours_back}H"
             
-            # Make the query request
-            response = self.api_client.arm_post(query_url, request_body)
+            # Make the query request using the new Log Analytics Query API
+            response = self.api_client.log_analytics_query(workspace_id, kql_query, timespan)
             
             if response.status_code == 200:
                 result = response.json()
@@ -3735,38 +3899,48 @@ class SecurityFunctions:
                                 level = row[col_map['EventLevelName']]
                                 self.formatter.print_key_value("Level", level)
                             
-                            if 'SeverityLevel' in col_map:
-                                severity = row[col_map['SeverityLevel']]
-                                self.formatter.print_key_value("Severity", severity)
-                            
-                            if 'Level' in col_map:
-                                level = row[col_map['Level']]
-                                self.formatter.print_key_value("Level", level)
-                            
                             if 'Message' in col_map:
                                 message = row[col_map['Message']]
                                 if message and len(str(message)) > 100:
                                     message = str(message)[:100] + "..."
                                 self.formatter.print_key_value("Message", message)
                             
-                            if 'SyslogMessage' in col_map:
-                                syslog_msg = row[col_map['SyslogMessage']]
-                                if syslog_msg and len(str(syslog_msg)) > 100:
-                                    syslog_msg = str(syslog_msg)[:100] + "..."
-                                self.formatter.print_key_value("Syslog", syslog_msg)
+                            if 'Source' in col_map:
+                                source = row[col_map['Source']]
+                                self.formatter.print_key_value("Source", source)
                             
-                            if 'ResourceProvider' in col_map:
-                                provider = row[col_map['ResourceProvider']]
-                                self.formatter.print_key_value("Provider", provider)
-                            
-                            if 'Caller' in col_map:
-                                caller = row[col_map['Caller']]
-                                self.formatter.print_key_value("Caller", caller)
-                    else:
-                        self.formatter.print_success("No error logs found in the specified time range")
-                        self.formatter.print_info("This may indicate good system health or limited error activity")
+                            if 'LogType' in col_map:
+                                log_type = row[col_map['LogType']]
+                                self.formatter.print_key_value("Log Type", log_type)
+                        else:
+                            self.formatter.print_success("No error logs found in the specified time range")
+                            self.formatter.print_info("This may indicate good system health or limited error activity")
                 else:
                     self.formatter.print_error("No data returned from Log Analytics query")
+                
+                # Try a simple fallback query for any error logs
+                try:
+                    max_subitems = getattr(self.config, 'max_subitems', 10)
+                    fallback_query = f"""
+                    AzureDiagnostics 
+                    | where TimeGenerated > ago({hours_back}h) 
+                    | where Level == "Error" 
+                    | project TimeGenerated, ResourceProvider, ResourceId, Level, Message
+                    | take {max_subitems}
+                    """
+                    
+                    fallback_response = self.api_client.log_analytics_query(workspace_id, fallback_query, timespan)
+                    if fallback_response.status_code == 200:
+                        fallback_results = fallback_response.json()
+                        fallback_tables = fallback_results.get('tables', [])
+                        if fallback_tables and fallback_tables[0].get('rows'):
+                            self.formatter.print_info("Found some error logs in AzureDiagnostics table")
+                        else:
+                            self.formatter.print_info("No error logs found in any tables")
+                    else:
+                        self.formatter.print_warning("Fallback query also failed")
+                except Exception as fallback_e:
+                    self.formatter.print_warning(f"Fallback query failed: {fallback_e}")
             elif response.status_code == 204:
                 self.formatter.print_success("Query executed successfully but no error logs found")
                 self.formatter.print_info("Status: 204 No Content (successful, but no data)")
@@ -3774,6 +3948,18 @@ class SecurityFunctions:
                 self.formatter.print_info("• No error logs in the last 24 hours (good system health)")
                 self.formatter.print_info("• Workspace may be empty or have no data sources")
                 self.formatter.print_info("• No agents configured to send logs to this workspace")
+            elif response.status_code == 400:
+                self.formatter.print_error(f"Bad request to Log Analytics: {response.status_code}")
+                self.formatter.print_error(f"Response: {response.text}")
+                self.formatter.print_info("This may indicate an issue with the query syntax or permissions")
+            elif response.status_code == 401:
+                self.formatter.print_error(f"Unauthorized access to Log Analytics: {response.status_code}")
+                self.formatter.print_error(f"Response: {response.text}")
+                self.formatter.print_info("Check Log Analytics permissions and token validity")
+            elif response.status_code == 403:
+                self.formatter.print_error(f"Forbidden access to Log Analytics: {response.status_code}")
+                self.formatter.print_error(f"Response: {response.text}")
+                self.formatter.print_info("Check Log Analytics Reader permissions")
             else:
                 self.formatter.print_error(f"Failed to query Log Analytics: {response.status_code}")
                 self.formatter.print_error(f"Response: {response.text}")
@@ -3834,10 +4020,8 @@ class SecurityFunctions:
         # First, check if workspace has any data
         try:
             test_query = "AzureActivity | take 1"
-            url = f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.OperationalInsights/workspaces/{workspace_name}/api/query?api-version=2020-08-01"
-            
-            payload = {"query": test_query, "timespan": "P30D"}
-            response = self.api_client.arm_post(url, payload)
+            workspace_id = self.api_client.get_workspace_id(subscription_id, resource_group, workspace_name)
+            response = self.api_client.log_analytics_query(workspace_id, test_query, "P30D")
             
             if response.status_code == 204:
                 self.formatter.print_warning("Log Analytics workspace appears to be empty or not collecting data")
@@ -3852,29 +4036,18 @@ class SecurityFunctions:
             self.formatter.print_warning(f"Could not verify workspace data: {e}")
         
         try:
-            # Query Log Analytics for PowerShell and Azure CLI command execution
+            # Query Log Analytics for PowerShell and Azure CLI command execution (optimized for performance)
+            max_subitems = getattr(self.config, 'max_subitems', 10)
             query = """
-            union
-            (AzureActivity
+            AzureActivity
+            | where TimeGenerated > ago(7d)
             | where OperationName contains "PowerShell" or OperationName contains "AzureCLI" or OperationName contains "Command"
-            | where TimeGenerated > ago(7d)
-            | project TimeGenerated, OperationName, Caller, ResourceGroup, Resource, Properties, SourceTable="AzureActivity"),
-            (AuditLogs
-            | where ActivityDisplayName contains "PowerShell" or ActivityDisplayName contains "Command" or ActivityDisplayName contains "Script"
-            | where TimeGenerated > ago(7d)
-            | project TimeGenerated, ActivityDisplayName, InitiatedBy, TargetResources, AdditionalDetails, SourceTable="AuditLogs")
+            | project TimeGenerated, OperationName, Caller, ResourceGroup, Resource, SourceTable = "AzureActivity"
             | order by TimeGenerated desc
-            | limit 20
+            | take {max_subitems}
             """
             
-            url = f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.OperationalInsights/workspaces/{workspace_name}/api/query?api-version=2020-08-01"
-            
-            payload = {
-                "query": query,
-                "timespan": "P7D"
-            }
-            
-            response = self.api_client.arm_post(url, payload)
+            response = self.api_client.log_analytics_query(workspace_id, query, "P7D")
             if response.status_code == 200:
                 results = response.json()
                 tables = results.get('tables', [])
@@ -3892,22 +4065,61 @@ class SecurityFunctions:
                 
                 if privileged_commands:
                     self.formatter.print_success(f"Found {len(privileged_commands)} privileged command executions in the last 7 days:")
-                    for cmd in privileged_commands[:5]:  # Show first 5
+                    max_subitems = getattr(self.config, 'max_subitems', 10)
+                    for cmd in privileged_commands[:max_subitems]:  # Show first max_subitems
                         time = cmd.get('TimeGenerated', 'N/A')
-                        operation = cmd.get('OperationName') or cmd.get('ActivityDisplayName', 'N/A')
-                        caller = cmd.get('Caller') or cmd.get('InitiatedBy', 'N/A')
+                        operation = cmd.get('OperationName', 'N/A')
+                        caller = cmd.get('Caller', 'N/A')
                         source_table = cmd.get('SourceTable', 'Unknown')
                         self.formatter.print_key_value(f"{time}: {operation} by {caller}", f"Source: {source_table}")
-                    if len(privileged_commands) > 5:
-                        self.formatter.print_info(f"... and {len(privileged_commands) - 5} more privileged commands")
+                    if len(privileged_commands) > max_subitems:
+                        self.formatter.print_info(f"... and {len(privileged_commands) - max_subitems} more privileged commands")
                 else:
                     self.formatter.print_error("No privileged command executions found in the last 7 days")
-                    self.formatter.print_info("This may indicate no privileged activity or missing logging")
+                self.formatter.print_info("This may indicate no privileged activity or missing logging")
+                
+                # Try a simple fallback query for any command activity
+                try:
+                    fallback_query = """
+                    AzureActivity 
+                    | where TimeGenerated > ago(7d) 
+                    | where OperationName contains "Command" or OperationName contains "Script"
+                    | project TimeGenerated, OperationName, Caller
+                    | take {max_subitems}
+                    """
+                    
+                    fallback_response = self.api_client.log_analytics_query(workspace_id, fallback_query, "P7D")
+                    if fallback_response.status_code == 200:
+                        fallback_results = fallback_response.json()
+                        fallback_tables = fallback_results.get('tables', [])
+                        if fallback_tables and fallback_tables[0].get('rows'):
+                            self.formatter.print_info("Found some command activity in AzureActivity table")
+                        else:
+                            self.formatter.print_info("No command activity found in any tables")
+                    else:
+                        self.formatter.print_warning("Fallback query also failed")
+                except Exception as fallback_e:
+                    self.formatter.print_warning(f"Fallback query failed: {fallback_e}")
             elif response.status_code == 204:
                 self.formatter.print_success("Query executed successfully but no privileged command data found")
                 self.formatter.print_info("This may indicate:")
                 self.formatter.print_info("• No privileged commands executed in the last 7 days")
                 self.formatter.print_info("• No privileged activity or logging")
+            elif response.status_code == 400:
+                self.formatter.print_error(f"Bad request to Log Analytics: {response.status_code}")
+                self.formatter.print_error(f"Response: {response.text}")
+                self.formatter.print_info("This may indicate an issue with the query syntax or permissions")
+            elif response.status_code == 401:
+                self.formatter.print_error(f"Unauthorized access to Log Analytics: {response.status_code}")
+                self.formatter.print_error(f"Response: {response.text}")
+                self.formatter.print_info("Check Log Analytics permissions and token validity")
+            elif response.status_code == 403:
+                self.formatter.print_error(f"Forbidden access to Log Analytics: {response.status_code}")
+                self.formatter.print_error(f"Response: {response.text}")
+                self.formatter.print_info("Check Log Analytics Reader permissions")
+            else:
+                self.formatter.print_error(f"Failed to query Log Analytics: {response.status_code}")
+                self.formatter.print_error(f"Response: {response.text}")
         except Exception as e:
             self.formatter.print_error(f"Exception occurred: {e}")
         
@@ -3930,19 +4142,20 @@ class SecurityFunctions:
         # 1. Check Sentinel Administrative Actions
         self.formatter.print_subsection("SENTINEL ADMINISTRATIVE ACTIONS")
         try:
+            # Get workspace ID for the Log Analytics Query API
+            workspace_id = self.api_client.get_workspace_id(subscription_id, resource_group, workspace_name)
+            
+            max_subitems = getattr(self.config, 'max_subitems', 10)
             query = """
             AzureActivity
             | where OperationNameValue startswith "MICROSOFT.SECURITYINSIGHTS"
             | where TimeGenerated > ago(1d)
-            | project TimeGenerated, Caller, OperationNameValue, ActivityStatusValue, ResourceGroup, Resource, Properties
+            | project TimeGenerated, Caller, OperationNameValue, ActivityStatusValue, ResourceGroup, Resource
             | order by TimeGenerated desc
-            | take 10
+            | take {max_subitems}
             """
             
-            url = f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.OperationalInsights/workspaces/{workspace_name}/api/query?api-version=2020-08-01"
-            payload = {"query": query, "timespan": "P1D"}
-            
-            response = self.api_client.arm_post(url, payload)
+            response = self.api_client.log_analytics_query(workspace_id, query, "P1D")
             if response.status_code == 200:
                 results = response.json()
                 tables = results.get('tables', [])
@@ -3974,8 +4187,18 @@ class SecurityFunctions:
                     self.formatter.print_success("No Sentinel administrative actions found in the last 24 hours")
             elif response.status_code == 204:
                 self.formatter.print_success("Query executed successfully but no administrative actions found")
+            elif response.status_code == 400:
+                self.formatter.print_error(f"Bad request to Log Analytics: {response.status_code}")
+                self.formatter.print_error(f"Response: {response.text}")
+            elif response.status_code == 401:
+                self.formatter.print_error(f"Unauthorized access to Log Analytics: {response.status_code}")
+                self.formatter.print_error(f"Response: {response.text}")
+            elif response.status_code == 403:
+                self.formatter.print_error(f"Forbidden access to Log Analytics: {response.status_code}")
+                self.formatter.print_error(f"Response: {response.text}")
             else:
                 self.formatter.print_error(f"Failed to query administrative actions: {response.status_code}")
+                self.formatter.print_error(f"Response: {response.text}")
         except Exception as e:
             self.formatter.print_error(f"Exception occurred: {e}")
         
@@ -3985,15 +4208,12 @@ class SecurityFunctions:
             query = """
             LAQueryLogs
             | where TimeGenerated > ago(7d)
-            | project TimeGenerated, AADEmail, Tool, QueryText, RequestContext, DurationMs, ResultCount
+            | project TimeGenerated, AADEmail, QueryText, RequestContext
             | order by TimeGenerated desc
-            | take 10
+            | take {max_subitems}
             """
             
-            url = f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.OperationalInsights/workspaces/{workspace_name}/api/query?api-version=2020-08-01"
-            payload = {"query": query, "timespan": "P7D"}
-            
-            response = self.api_client.arm_post(url, payload)
+            response = self.api_client.log_analytics_query(workspace_id, query, "P7D")
             if response.status_code == 200:
                 results = response.json()
                 tables = results.get('tables', [])
@@ -4013,12 +4233,10 @@ class SecurityFunctions:
                             self.formatter.print_key_value("When", row[col_map['TimeGenerated']])
                         if 'AADEmail' in col_map:
                             self.formatter.print_key_value("Event Source (Who)", row[col_map['AADEmail']])
-                        if 'Tool' in col_map:
-                            self.formatter.print_key_value("Event Type", f"Query via {row[col_map['Tool']]}")
-                        if 'DurationMs' in col_map:
-                            self.formatter.print_key_value("Outcome", f"Completed in {row[col_map['DurationMs']]}ms")
-                        if 'ResultCount' in col_map:
-                            self.formatter.print_key_value("Results", f"{row[col_map['ResultCount']]} records returned")
+                        if 'RequestContext' in col_map:
+                            self.formatter.print_key_value("Event Type", f"Query via {row[col_map['RequestContext']]}")
+                        else:
+                            self.formatter.print_key_value("Event Type", "Log Analytics Query")
                         if 'QueryText' in col_map:
                             query_text = row[col_map['QueryText']]
                             # Truncate long queries for display
@@ -4029,70 +4247,168 @@ class SecurityFunctions:
                     self.formatter.print_success("No Log Analytics queries found in the last 7 days")
             elif response.status_code == 204:
                 self.formatter.print_success("Query executed successfully but no query logs found")
-            else:
-                self.formatter.print_error(f"Failed to query LAQueryLogs: {response.status_code}")
         except Exception as e:
             self.formatter.print_error(f"Exception occurred: {e}")
         
         # 3. Check Windows Command Execution
         self.formatter.print_subsection("WINDOWS COMMAND EXECUTION AUDITING")
         try:
-            query = """
-            SecurityEvent
-            | where EventID == 4688
-            | where TimeGenerated > ago(7d)
-            | project TimeGenerated, Account, ProcessCommandLine, Computer, ProcessName, ParentProcessName, LogonId
-            | order by TimeGenerated desc
-            | take 10
-            """
+            # First try to check if SecurityEvent table exists (without logging errors)
+            test_query = "SecurityEvent | take 1"
+            test_response = self._test_table_exists(workspace_id, test_query)
             
-            url = f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.OperationalInsights/workspaces/{workspace_name}/api/query?api-version=2020-08-01"
-            payload = {"query": query, "timespan": "P7D"}
-            
-            response = self.api_client.arm_post(url, payload)
-            if response.status_code == 200:
-                results = response.json()
-                tables = results.get('tables', [])
+            if test_response is False:  # Table doesn't exist
+                # SecurityEvent table doesn't exist, use AzureActivity instead
+                self.formatter.print_info("SecurityEvent table not available - using AzureActivity for command execution auditing")
                 
-                if tables and tables[0].get('rows'):
-                    rows = tables[0]['rows']
-                    columns = tables[0]['columns']
+                query = """
+                AzureActivity
+                | where TimeGenerated > ago(7d)
+                | where OperationName contains "Command" or OperationName contains "Script" or OperationName contains "PowerShell" or OperationName contains "AzureCLI"
+                | project TimeGenerated, Caller, OperationName, ResourceGroup, Resource
+                | order by TimeGenerated desc
+                | take {max_subitems}
+                """
+                
+                response = self.api_client.log_analytics_query(workspace_id, query, "P7D")
+                if response.status_code == 200:
+                    results = response.json()
+                    tables = results.get('tables', [])
                     
-                    self.formatter.print_success(f"Found {len(rows)} Windows command executions in the last 7 days")
-                    
-                    col_map = {col['name']: i for i, col in enumerate(columns)}
-                    
-                    for i, row in enumerate(rows, 1):
-                        self.formatter.print_subsection(f"COMMAND EXECUTION {i}")
+                    if tables and tables[0].get('rows'):
+                        rows = tables[0]['rows']
+                        columns = tables[0]['columns']
                         
-                        if 'TimeGenerated' in col_map:
-                            self.formatter.print_key_value("When", row[col_map['TimeGenerated']])
-                        if 'Account' in col_map:
-                            self.formatter.print_key_value("Event Source (Who)", row[col_map['Account']])
-                        if 'ProcessName' in col_map:
-                            self.formatter.print_key_value("Event Type", f"Process: {row[col_map['ProcessName']]}")
-                        if 'Computer' in col_map:
-                            self.formatter.print_key_value("Where", row[col_map['Computer']])
-                        if 'LogonId' in col_map:
-                            self.formatter.print_key_value("Associated Identity (Logon ID)", row[col_map['LogonId']])
-                        if 'ProcessCommandLine' in col_map:
-                            cmd_line = row[col_map['ProcessCommandLine']]
-                            # Truncate long command lines for display
-                            if len(cmd_line) > 100:
-                                cmd_line = cmd_line[:100] + "..."
-                            self.formatter.print_key_value("Full Command Line", cmd_line)
-                        if 'ParentProcessName' in col_map:
-                            self.formatter.print_key_value("Parent Process", row[col_map['ParentProcessName']])
+                        self.formatter.print_success(f"Found {len(rows)} command executions in the last 7 days (from AzureActivity)")
+                        
+                        col_map = {col['name']: i for i, col in enumerate(columns)}
+                        
+                        for i, row in enumerate(rows, 1):
+                            self.formatter.print_subsection(f"COMMAND EXECUTION {i}")
+                            
+                            if 'TimeGenerated' in col_map:
+                                self.formatter.print_key_value("When", row[col_map['TimeGenerated']])
+                            if 'Caller' in col_map:
+                                self.formatter.print_key_value("Event Source (Who)", row[col_map['Caller']])
+                            if 'OperationName' in col_map:
+                                self.formatter.print_key_value("Event Type", row[col_map['OperationName']])
+                            if 'ResourceGroup' in col_map:
+                                self.formatter.print_key_value("Where (Resource Group)", row[col_map['ResourceGroup']])
+                            if 'Resource' in col_map:
+                                self.formatter.print_key_value("Where (Resource)", row[col_map['Resource']])
+                    else:
+                        self.formatter.print_success("No command executions found in the last 7 days")
+                        self.formatter.print_info("Note: Windows Security Events connector not configured - using AzureActivity table")
+                elif response.status_code == 204:
+                    self.formatter.print_success("Query executed successfully but no command executions found")
+                    self.formatter.print_info("Note: Windows Security Events connector not configured - using AzureActivity table")
                 else:
-                    self.formatter.print_success("No Windows command executions found in the last 7 days")
-            elif response.status_code == 204:
-                self.formatter.print_success("Query executed successfully but no command executions found")
-            else:
-                self.formatter.print_error(f"Failed to query SecurityEvent: {response.status_code}")
+                    self.formatter.print_error(f"Failed to query AzureActivity: {response.status_code}")
+                    self.formatter.print_error(f"Response: {response.text}")
+            elif test_response is True:  # Table exists
+                # SecurityEvent table exists, use it
+                query = """
+                SecurityEvent
+                | where EventID == 4688
+                | where TimeGenerated > ago(7d)
+                | project TimeGenerated, Account, Computer, ProcessName, ParentProcessName
+                | order by TimeGenerated desc
+                | take {max_subitems}
+                """
+                
+                response = self.api_client.log_analytics_query(workspace_id, query, "P7D")
+                if response.status_code == 200:
+                    results = response.json()
+                    tables = results.get('tables', [])
+                    
+                    if tables and tables[0].get('rows'):
+                        rows = tables[0]['rows']
+                        columns = tables[0]['columns']
+                        
+                        self.formatter.print_success(f"Found {len(rows)} Windows command executions in the last 7 days")
+                        
+                        col_map = {col['name']: i for i, col in enumerate(columns)}
+                        
+                        for i, row in enumerate(rows, 1):
+                            self.formatter.print_subsection(f"COMMAND EXECUTION {i}")
+                            
+                            if 'TimeGenerated' in col_map:
+                                self.formatter.print_key_value("When", row[col_map['TimeGenerated']])
+                            if 'Account' in col_map:
+                                self.formatter.print_key_value("Event Source (Who)", row[col_map['Account']])
+                            if 'ProcessName' in col_map:
+                                self.formatter.print_key_value("Event Type", f"Process: {row[col_map['ProcessName']]}")
+                            if 'Computer' in col_map:
+                                self.formatter.print_key_value("Where", row[col_map['Computer']])
+                            if 'ParentProcessName' in col_map:
+                                self.formatter.print_key_value("Parent Process", row[col_map['ParentProcessName']])
+                    else:
+                        self.formatter.print_success("No Windows command executions found in the last 7 days")
+                elif response.status_code == 204:
+                    self.formatter.print_success("Query executed successfully but no command executions found")
+                else:
+                    self.formatter.print_error(f"Failed to query SecurityEvent: {response.status_code}")
+                    self.formatter.print_error(f"Response: {response.text}")
         except Exception as e:
             self.formatter.print_error(f"Exception occurred: {e}")
         
         self.formatter.print_separator()
+    
+    def _test_table_exists(self, workspace_id: str, query: str) -> bool:
+        """Test if a Log Analytics table exists without logging errors"""
+        try:
+            import urllib.parse
+            import requests
+            from azure.identity import ClientSecretCredential
+            
+            query_encoded = urllib.parse.quote(query)
+            timespan_encoded = urllib.parse.quote("P1D")
+            
+            # Use base URLs from config to determine environment
+            arm_base_url = getattr(self.config, 'arm_base_url', 'https://management.azure.com')
+            graph_base_url = getattr(self.config, 'graph_base_url', 'https://graph.microsoft.com/v1.0')
+            
+            # Check if this is a government environment
+            is_government = (
+                "usgovcloudapi.net" in arm_base_url or
+                "graph.microsoft.us" in graph_base_url
+            )
+            
+            # Get Log Analytics token
+            credential = ClientSecretCredential(
+                self.config.tenant_id, 
+                self.config.client_id, 
+                self.config.client_secret
+            )
+            
+            if is_government:
+                log_analytics_scope = "https://api.loganalytics.us/.default"
+                url = f"https://api.loganalytics.us/v1/workspaces/{workspace_id}/query?query={query_encoded}&timespan={timespan_encoded}"
+            else:
+                log_analytics_scope = "https://api.loganalytics.io/.default"
+                url = f"https://api.loganalytics.io/v1/workspaces/{workspace_id}/query?query={query_encoded}&timespan={timespan_encoded}"
+            
+            log_analytics_token = credential.get_token(log_analytics_scope).token
+            
+            headers = {
+                "Authorization": f"Bearer {log_analytics_token}",
+                "Content-Type": "application/json"
+            }
+            
+            response = requests.get(url, headers=headers)
+            
+            # Return True if table exists (200 or 204), False if it doesn't exist (400 with SecurityEvent error)
+            if response.status_code in [200, 204]:
+                return True
+            elif response.status_code == 400 and "SecurityEvent" in response.text:
+                return False
+            else:
+                # For other errors, assume table doesn't exist
+                return False
+                
+        except Exception:
+            # If any exception occurs, assume table doesn't exist
+            return False
     
     def check_user_risk_policy(self):
         """Check Microsoft Entra User Risk Policy configuration."""
@@ -4151,10 +4467,20 @@ class SecurityFunctions:
                         self.formatter.print_key_value("Risk State", det.get('riskState', 'N/A'))
                         self.formatter.print_key_value("Detection Time", det.get('activityDateTime', 'N/A'))
                         self.formatter.print_key_value("Detection ID", det.get('id', 'N/A'))
-            elif response.status_code == 403 and 'not licensed for this feature' in response.text.lower():
-                self.formatter.print_warning("Identity Protection risk detections require Microsoft Entra ID P2 (Azure AD Premium P2). This feature is not available in your tenant.")
+            elif response.status_code == 403:
+                # Check for licensing error specifically
+                if self._handle_identity_protection_license_error(response):
+                    pass  # Error already handled by helper method
+                else:
+                    self.formatter.print_error(f"Failed to retrieve risk detections: {response.status_code}")
+                    error_data = response.json()
+                    if error_data:
+                        self.formatter.print_info(f"Error details: {error_data.get('error', {}).get('message', 'Unknown error')}")
             else:
                 self.formatter.print_error(f"Failed to retrieve risk detections: {response.status_code}")
+                error_data = response.json()
+                if error_data:
+                    self.formatter.print_info(f"Error details: {error_data.get('error', {}).get('message', 'Unknown error')}")
         except Exception as e:
             self.formatter.print_error(f"Exception occurred while retrieving risk detections: {e}")
         
@@ -4192,10 +4518,20 @@ class SecurityFunctions:
                             self.formatter.print_key_value("Location", f"{city}, {country}")
                         
                         self.formatter.print_key_value("Detection ID", det.get('id', 'N/A'))
-            elif response.status_code == 403 and 'not licensed for this feature' in response.text.lower():
-                self.formatter.print_warning("Sign-in risk detections require Microsoft Entra ID P2 (Azure AD Premium P2). This feature is not available in your tenant.")
+            elif response.status_code == 403:
+                # Check for licensing error specifically
+                if self._handle_identity_protection_license_error(response):
+                    pass  # Error already handled by helper method
+                else:
+                    self.formatter.print_error(f"Failed to retrieve sign-in risk detections: {response.status_code}")
+                    error_data = response.json()
+                    if error_data:
+                        self.formatter.print_info(f"Error details: {error_data.get('error', {}).get('message', 'Unknown error')}")
             else:
                 self.formatter.print_error(f"Failed to retrieve sign-in risk detections: {response.status_code}")
+                error_data = response.json()
+                if error_data:
+                    self.formatter.print_info(f"Error details: {error_data.get('error', {}).get('message', 'Unknown error')}")
         except Exception as e:
             self.formatter.print_error(f"Exception occurred while retrieving sign-in risk detections: {e}")
         
@@ -4300,10 +4636,10 @@ class SecurityFunctions:
         self.formatter.print_separator()
     
     def check_log_analytics_retention_settings(self):
-        """Check Log Analytics Retention Settings."""
+        """Check Log Analytics Retention Settings and Immutability."""
         self.formatter.print_header(
-            "LOG ANALYTICS RETENTION SETTINGS",
-            "This function checks and prints the Log Analytics workspace retention settings. It evidences data retention policies for compliance and audit requirements."
+            "LOG ANALYTICS WORKSPACE IMMUTABILITY & RETENTION SETTINGS",
+            "This function checks and prints the Log Analytics workspace retention and immutability settings. It evidences data retention policies, immutability protection, and compliance requirements."
         )
         
         workspace_name = getattr(self.config, 'workspace_name', None)
@@ -4332,7 +4668,17 @@ class SecurityFunctions:
                 data_exports = properties.get('features', {}).get('enableDataExport', False)
                 self.formatter.print_key_value("Data Export Enabled", data_exports)
                 
-                if properties.get('retentionInDays', 0) >= 90:
+                # Check immutability settings
+                immutability = properties.get('immutableWorkspaceProperties', {})
+                if immutability:
+                    state = immutability.get('state', 'Not set')
+                    self.formatter.print_key_value("Immutability State", state)
+                else:
+                    self.formatter.print_warning("Immutability State: Not set or not available")
+                
+                # Compliance recommendations
+                retention_days = properties.get('retentionInDays', 0)
+                if retention_days >= 90:
                     self.formatter.print_success("Retention period meets common compliance requirements (90+ days)")
                 else:
                     self.formatter.print_warning("Retention period may not meet compliance requirements")
@@ -4397,19 +4743,57 @@ class SecurityFunctions:
             response = self.api_client.graph_get(f"/auditLogs/directoryAudits?$top={top}&$filter=activityDisplayName eq 'Add user' or activityDisplayName eq 'Reset user password' or activityDisplayName eq 'Change user password'")
             
             if response.status_code == 200:
-                events = response.json().get('value', [])
+                response_data = response.json()
+                if response_data is None:
+                    self.formatter.print_error("Invalid response data received")
+                    return
+                    
+                events = response_data.get('value', []) if response_data is not None else []
                 if not events:
                     self.formatter.print_info("No recent credential distribution events found.")
                 else:
                     self.formatter.print_success(f"Found {len(events)} recent credential distribution events")
                     
                     for i, event in enumerate(events, 1):
+                        if event is None:
+                            continue
+                            
                         self.formatter.print_subsection(f"CREDENTIAL EVENT {i}")
-                        self.formatter.print_key_value("Activity", event.get('activityDisplayName', 'N/A'))
-                        self.formatter.print_key_value("Initiated By", event.get('initiatedBy', {}).get('user', {}).get('userPrincipalName', 'N/A'))
-                        self.formatter.print_key_value("Target User", event.get('targetResources', [{}])[0].get('userPrincipalName', 'N/A') if event.get('targetResources') else 'N/A')
-                        self.formatter.print_key_value("Timestamp", event.get('activityDateTime', 'N/A'))
-                        self.formatter.print_key_value("Result", event.get('result', 'N/A'))
+                        
+                        # Safe access to activityDisplayName
+                        activity = event.get('activityDisplayName', 'N/A')
+                        self.formatter.print_key_value("Activity", activity)
+                        
+                        # Safe access to initiatedBy nested structure
+                        initiated_by = event.get('initiatedBy', {})
+                        if initiated_by is not None:
+                            user_info = initiated_by.get('user', {})
+                            if user_info is not None:
+                                initiated_by_user = user_info.get('userPrincipalName', 'N/A')
+                            else:
+                                initiated_by_user = 'N/A'
+                        else:
+                            initiated_by_user = 'N/A'
+                        self.formatter.print_key_value("Initiated By", initiated_by_user)
+                        
+                        # Safe access to targetResources nested structure
+                        target_resources = event.get('targetResources', [])
+                        if target_resources and len(target_resources) > 0:
+                            first_target = target_resources[0]
+                            if first_target is not None:
+                                target_user = first_target.get('userPrincipalName', 'N/A')
+                            else:
+                                target_user = 'N/A'
+                        else:
+                            target_user = 'N/A'
+                        self.formatter.print_key_value("Target User", target_user)
+                        
+                        # Safe access to timestamp and result
+                        timestamp = event.get('activityDateTime', 'N/A')
+                        self.formatter.print_key_value("Timestamp", timestamp)
+                        
+                        result = event.get('result', 'N/A')
+                        self.formatter.print_key_value("Result", result)
             else:
                 self.formatter.print_error(f"Failed to retrieve credential distribution events: {response.status_code}")
         except Exception as e:
@@ -4525,6 +4909,9 @@ class SecurityFunctions:
             return
         
         try:
+            # Get workspace ID for the Log Analytics Query API
+            workspace_id = self.api_client.get_workspace_id(subscription_id, resource_group, workspace_name)
+            
             # Query for FIM alerts
             query = f"""
             SecurityAlert
@@ -4534,10 +4921,7 @@ class SecurityFunctions:
             | take {top}
             """
             
-            url = f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.OperationalInsights/workspaces/{workspace_name}/api/query?api-version=2020-08-01"
-            payload = {"query": query, "timespan": "P7D"}
-            
-            response = self.api_client.arm_post(url, payload)
+            response = self.api_client.log_analytics_query(workspace_id, query, "P7D")
             
             if response.status_code == 200:
                 results = response.json()
@@ -4604,7 +4988,8 @@ class SecurityFunctions:
                     
                     if successful_deployments:
                         self.formatter.print_subsection("RECENT SUCCESSFUL DEPLOYMENTS")
-                        for deployment in successful_deployments[:5]:
+                        max_subitems = getattr(self.config, 'max_subitems', 10)
+                        for deployment in successful_deployments[:max_subitems]:
                             self.formatter.print_key_value(
                                 deployment.get('name', 'Unknown'),
                                 f"Template: {deployment.get('properties', {}).get('templateLink', {}).get('uri', 'Local template')}"
@@ -4612,7 +4997,8 @@ class SecurityFunctions:
                     
                     if failed_deployments:
                         self.formatter.print_subsection("RECENT FAILED DEPLOYMENTS")
-                        for deployment in failed_deployments[:3]:
+                        max_subitems = getattr(self.config, 'max_subitems', 10)
+                        for deployment in failed_deployments[:max_subitems]:
                             self.formatter.print_warning(f"{deployment.get('name', 'Unknown')} - Failed")
                 else:
                     self.formatter.print_info("No recent deployments found")
@@ -4673,18 +5059,22 @@ class SecurityFunctions:
             self.formatter.print_error(f"Exception occurred while retrieving incidents: {e}")
         
         try:
+            # Get workspace ID for the Log Analytics Query API
+            workspace_id = self.api_client.get_workspace_id(subscription_id, resource_group, workspace_name)
+            
             # Query for recent security alerts
+            max_subitems = getattr(self.config, 'max_subitems', 10)
             query = f"""
             SecurityAlert
             | where TimeGenerated > ago({hours_back}h)
             | order by TimeGenerated desc
-            | take 20
+            | take {max_subitems}
             """
             
-            url = f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.OperationalInsights/workspaces/{workspace_name}/api/query?api-version=2020-08-01"
-            payload = {"query": query, "timespan": f"PT{hours_back}H"}
+            # Calculate timespan for the new API (e.g., "P24H" for 24 hours)
+            timespan = f"P{hours_back}H"
             
-            response = self.api_client.arm_post(url, payload)
+            response = self.api_client.log_analytics_query(workspace_id, query, timespan)
             
             if response.status_code == 200:
                 results = response.json()
@@ -4731,8 +5121,6 @@ class SecurityFunctions:
                     self.formatter.print_info("This may indicate good security posture or limited monitoring")
             elif response.status_code == 204:
                 self.formatter.print_success("Query executed successfully but no security alerts found")
-            else:
-                self.formatter.print_error(f"Failed to query security alerts: {response.status_code}")
         except Exception as e:
             self.formatter.print_error(f"Exception occurred while querying security alerts: {e}")
         
@@ -4829,11 +5217,12 @@ class SecurityFunctions:
                         self.formatter.print_subsection("NON-SENTINEL WORKSPACES")
                         self.formatter.print_info(f"Found {len(non_sentinel_workspaces)} workspaces without Microsoft Sentinel:")
                         
-                        for workspace in non_sentinel_workspaces[:5]:  # Show first 5
+                        max_subitems = getattr(self.config, 'max_subitems', 10)
+                        for workspace in non_sentinel_workspaces[:max_subitems]:  # Show first max_subitems
                             self.formatter.print_key_value(f"{workspace['name']}", f"RG: {workspace['resource_group']}, Location: {workspace['location']}")
                         
-                        if len(non_sentinel_workspaces) > 5:
-                            self.formatter.print_info(f"... and {len(non_sentinel_workspaces) - 5} more workspaces")
+                        if len(non_sentinel_workspaces) > max_subitems:
+                            self.formatter.print_info(f"... and {len(non_sentinel_workspaces) - max_subitems} more workspaces")
                         
                         self.formatter.print_info("Consider enabling Microsoft Sentinel on these workspaces for comprehensive security monitoring")
                 else:
@@ -5130,11 +5519,15 @@ class SecurityFunctions:
                             total_p2p_blocked_nsgs += 1
                             self.formatter.print_success(f"P2P protocols blocked: {', '.join(p2p_protocols_blocked)}")
                         else:
-                            self.formatter.print_warning("No explicit rules found blocking P2P protocols. Review NSG configuration.")
+                            self.formatter.print_info(f"NSG '{nsg_name}' has no explicit P2P blocking rules")
                         
                     self.formatter.print_separator()
                     
                     self.formatter.print_key_value("NSGs with P2P restrictions", f"{total_p2p_blocked_nsgs} out of {len(nsgs)}")
+                    
+                    # Print summary warning only once
+                    if total_p2p_blocked_nsgs == 0:
+                        self.formatter.print_warning("No NSGs found with explicit P2P protocol blocking rules. Consider implementing NSG rules to block common P2P ports.")
             else:
                 self.formatter.print_error(f"Failed to retrieve NSGs: {response.status_code}")
             
@@ -5213,24 +5606,24 @@ class SecurityFunctions:
             
             if workspace_name and resource_group:
                 try:
-                    # Query for potential P2P traffic patterns using simplified approach
+                    # Get workspace ID for the Log Analytics Query API
+                    workspace_id = self.api_client.get_workspace_id(subscription_id, resource_group, workspace_name)
+                    
+                    # Query for potential P2P traffic patterns - first check available columns
                     query = """
+                    max_subitems = getattr(self.config, 'max_subitems', 10)
                     AzureDiagnostics
                     | where ResourceType in ("NETWORKSECURITYGROUPS", "AZUREFIREWALLS")
                     | where Action_s == "Deny"
                     | where isnotempty(DestinationPort_d)
                     | where DestinationPort_d in (6881, 6882, 6883, 6884, 6885, 6886, 6887, 6888, 6889, 4662, 4663, 4664, 4665, 4666, 6346, 6347, 6348, 411, 412, 1214, 4444, 2234, 6969)
-                    | extend SourceIP = coalesce(SourceIP_s, SourceIPAddress_s, SourceIPAddress, "Unknown")
-                    | extend DestinationIP = coalesce(DestinationIP_s, DestinationIPAddress_s, DestinationIPAddress, "Unknown")
-                    | extend DestinationPort = coalesce(DestinationPort_d, DestinationPort, "Unknown")
-                    | project TimeGenerated, ResourceType, SourceIP, DestinationIP, DestinationPort, Action_s
+                    | project TimeGenerated, ResourceType, DestinationPort_d, Action_s
                     | order by TimeGenerated desc
-                    | take 10
+                    | take {max_subitems}
                     """
                     
-                    query_url = f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.OperationalInsights/workspaces/{workspace_name}/api/query?api-version=2020-08-01"
-                    payload = {"query": query, "timespan": "P7D"}
-                    query_response = self.api_client.arm_post(query_url, payload)
+                    # Use the correct Log Analytics Query API endpoint
+                    query_response = self.api_client.log_analytics_query(workspace_id, query, "P7D")
                     
                     if query_response.status_code == 200:
                         results = query_response.json()
@@ -5246,12 +5639,10 @@ class SecurityFunctions:
                             for i, row in enumerate(rows, 1):
                                 time_generated = row[col_map.get('TimeGenerated', 0)] if 'TimeGenerated' in col_map else 'Unknown'
                                 resource_type = row[col_map.get('ResourceType', 1)] if 'ResourceType' in col_map else 'Unknown'
-                                source_ip = row[col_map.get('SourceIP', 2)] if 'SourceIP' in col_map else 'Unknown'
-                                destination_ip = row[col_map.get('DestinationIP', 3)] if 'DestinationIP' in col_map else 'Unknown'
-                                destination_port = row[col_map.get('DestinationPort', 4)] if 'DestinationPort' in col_map else 'Unknown'
-                                action = row[col_map.get('Action_s', 5)] if 'Action_s' in col_map else 'Unknown'
+                                destination_port = row[col_map.get('DestinationPort_d', 2)] if 'DestinationPort_d' in col_map else 'Unknown'
+                                action = row[col_map.get('Action_s', 3)] if 'Action_s' in col_map else 'Unknown'
                                 
-                                self.formatter.print_key_value(f"Event {i}", f"Time: {time_generated}, Type: {resource_type}, Source: {source_ip}, Dest: {destination_ip}:{destination_port}, Action: {action}")
+                                self.formatter.print_key_value(f"Event {i}", f"Time: {time_generated}, Type: {resource_type}, Port: {destination_port}, Action: {action}")
                         else:
                             self.formatter.print_info("No recent P2P traffic denial events found in logs.")
                     else:
@@ -5263,10 +5654,9 @@ class SecurityFunctions:
                             | where ResourceType in ("NETWORKSECURITYGROUPS", "AZUREFIREWALLS")
                             | where Action_s == "Deny"
                             | where TimeGenerated > ago(7d)
-                            | take 5
+                            | take {max_subitems}
                             """
-                            fallback_payload = {"query": fallback_query, "timespan": "P7D"}
-                            fallback_response = self.api_client.arm_post(query_url, fallback_payload)
+                            fallback_response = self.api_client.log_analytics_query(workspace_id, fallback_query, "P7D")
                             if fallback_response.status_code == 200:
                                 self.formatter.print_info("Fallback query successful - checking for any denial events")
                                 fallback_results = fallback_response.json()
@@ -5326,15 +5716,17 @@ class SecurityFunctions:
         # 1. Check System Performance Monitoring
         self.formatter.print_subsection("SYSTEM PERFORMANCE MONITORING")
         try:
+            # Get workspace ID for the Log Analytics Query API
+            workspace_id = self.api_client.get_workspace_id(subscription_id, resource_group, workspace_name)
+            
             query = f"""
             Perf
             | where TimeGenerated > ago(1d)
             | order by TimeGenerated desc
             | take {max_lines}
             """
-            url = f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.OperationalInsights/workspaces/{workspace_name}/api/query?api-version=2020-08-01"
-            payload = {"query": query, "timespan": "P1D"}
-            response = self.api_client.arm_post(url, payload)
+            
+            response = self.api_client.log_analytics_query(workspace_id, query, "P1D")
 
             if response.status_code == 200:
                 results = response.json()
@@ -5525,6 +5917,7 @@ class SecurityFunctions:
         # 4. Check for Recent Performance Alerts
         self.formatter.print_subsection("RECENT PERFORMANCE ALERTS")
         try:
+            max_subitems = getattr(self.config, 'max_subitems', 10)
             # Try multiple alert table names and approaches
             alert_queries = [
                 # Try SecurityAlert table first
@@ -5533,24 +5926,23 @@ class SecurityFunctions:
                 | where TimeGenerated > ago(7d)
                 | where AlertName contains "performance" or AlertName contains "cpu" or AlertName contains "memory" or AlertName contains "disk"
                 | order by TimeGenerated desc
-                | take 10
+                | take {max_subitems}
                 """,
                 # Try AzureDiagnostics for alerts
                 """
                 AzureDiagnostics
                 | where ResourceType == "SECURITYINSIGHTS"
                 | where TimeGenerated > ago(7d)
-                | where AlertName_s contains "performance" or AlertName_s contains "cpu" or AlertName_s contains "memory" or AlertName_s contains "disk"
                 | order by TimeGenerated desc
-                | take 10
+                | take {max_subitems}
                 """,
                 # Try any alerts in the workspace
                 """
                 union isfuzzy=true
-                (SecurityAlert | where TimeGenerated > ago(7d) | take 5),
-                (AzureDiagnostics | where ResourceType == "SECURITYINSIGHTS" | where TimeGenerated > ago(7d) | take 5)
+                (SecurityAlert | where TimeGenerated > ago(7d) | take {max_subitems}),
+                (AzureDiagnostics | where ResourceType == "SECURITYINSIGHTS" | where TimeGenerated > ago(7d) | take {max_subitems})
                 | order by TimeGenerated desc
-                | take 10
+                | take {max_subitems}
                 """,
                 # Simple query to check if any alerts exist
                 """
@@ -5561,13 +5953,11 @@ class SecurityFunctions:
                 """
             ]
             
-            alerts_url = f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.OperationalInsights/workspaces/{workspace_name}/api/query?api-version=2020-08-01"
             alerts_found = False
             
             for i, alerts_query in enumerate(alert_queries):
                 try:
-                    alerts_payload = {"query": alerts_query, "timespan": "P7D"}
-                    alerts_response = self.api_client.arm_post(alerts_url, alerts_payload)
+                    alerts_response = self.api_client.log_analytics_query(workspace_id, alerts_query, "P7D")
                     
                     if alerts_response.status_code == 200:
                         alerts_results = alerts_response.json()
@@ -5597,9 +5987,9 @@ class SecurityFunctions:
                                 
                                 for j, alert_row in enumerate(alerts_rows, 1):
                                     alert_time = alert_row[alerts_col_map.get('TimeGenerated', 0)] if 'TimeGenerated' in alerts_col_map else 'Unknown'
-                                    alert_name = alert_row[alerts_col_map.get('AlertName_s', 1)] if 'AlertName_s' in alerts_col_map else 'Unknown'
+                                    resource_type = alert_row[alerts_col_map.get('ResourceType', 1)] if 'ResourceType' in alerts_col_map else 'Unknown'
                                     
-                                    self.formatter.print_key_value(f"Alert {j}", f"Time: {alert_time}, Name: {alert_name}")
+                                    self.formatter.print_key_value(f"Alert {j}", f"Time: {alert_time}, Type: {resource_type}")
                                 alerts_found = True
                                 break
                             
@@ -5610,7 +6000,7 @@ class SecurityFunctions:
                                 
                                 for j, alert_row in enumerate(alerts_rows, 1):
                                     alert_time = alert_row[alerts_col_map.get('TimeGenerated', 0)] if 'TimeGenerated' in alerts_col_map else 'Unknown'
-                                    alert_name = alert_row[alerts_col_map.get('AlertName', 1)] if 'AlertName' in alerts_col_map else alert_row[alerts_col_map.get('AlertName_s', 1)] if 'AlertName_s' in alerts_col_map else 'Unknown'
+                                    alert_name = alert_row[alerts_col_map.get('AlertName', 1)] if 'AlertName' in alerts_col_map else 'Unknown'
                                     
                                     self.formatter.print_key_value(f"Alert {j}", f"Time: {alert_time}, Name: {alert_name}")
                                 alerts_found = True
@@ -5944,19 +6334,19 @@ class SecurityFunctions:
         if workspace_name and resource_group:
             try:
                 # Query for vulnerability-related alerts in Sentinel
+                max_subitems = getattr(self.config, 'max_subitems', 10)
                 vulnerability_query = """
                 SecurityAlert
                 | where TimeGenerated > ago(30d)
                 | where AlertName contains "vulnerability" or AlertName contains "Vulnerability" or AlertName contains "CVE" or AlertName contains "cve" or AlertName contains "SonarQube" or AlertName contains "sonarqube" or AlertName contains "CodeQuality" or AlertName contains "code quality"
                 | where ProviderName in ("Microsoft Defender for Cloud", "Microsoft Defender for Endpoint", "Azure Security Center", "SonarQube", "Code Quality Scanner")
-                | summarize count() by AlertName, ProviderName, Severity
+                | summarize count() by AlertName, ProviderName
                 | order by count_ desc
-                | take 20
+                | take {max_subitems}
                 """
                 
-                query_url = f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.OperationalInsights/workspaces/{workspace_name}/api/query?api-version=2020-08-01"
-                payload = {"query": vulnerability_query, "timespan": "P30D"}
-                query_response = self.api_client.arm_post(query_url, payload)
+                workspace_id = self.api_client.get_workspace_id(subscription_id, resource_group, workspace_name)
+                query_response = self.api_client.log_analytics_query(workspace_id, vulnerability_query, "P30D")
                 
                 if query_response.status_code == 200:
                     results = query_response.json()
@@ -5971,11 +6361,9 @@ class SecurityFunctions:
                         for i, row in enumerate(rows, 1):
                             alert_name = row[0] if len(row) > 0 else 'Unknown'
                             provider = row[1] if len(row) > 1 else 'Unknown'
-                            severity = row[2] if len(row) > 2 else 'Unknown'
-                            count = row[3] if len(row) > 3 else 'Unknown'
+                            count = row[2] if len(row) > 2 else 'Unknown'
                             
                             self.formatter.print_key_value(f"Alert {i}", f"{alert_name} ({provider})")
-                            self.formatter.print_key_value(f"  Severity", severity)
                             self.formatter.print_key_value(f"  Count", count)
                         
                         sentinel_integration_configured = True
@@ -5992,8 +6380,7 @@ class SecurityFunctions:
                         | order by count_ desc
                         """
                         
-                        broader_payload = {"query": broader_query, "timespan": "P30D"}
-                        broader_response = self.api_client.arm_post(query_url, broader_payload)
+                        broader_response = self.api_client.log_analytics_query(workspace_id, broader_query, "P30D")
                         
                         if broader_response.status_code == 200:
                             broader_results = broader_response.json()
@@ -6122,6 +6509,7 @@ class SecurityFunctions:
                         # Check default security rules (priority 65000)
                         default_rules = nsg.get('properties', {}).get('defaultSecurityRules', [])
                         deny_all_inbound_found = False
+                        misconfigured_deny_all_inbound = False
                         
                         for rule in default_rules:
                             rule_name = rule.get('name', 'Unknown')
@@ -6129,17 +6517,21 @@ class SecurityFunctions:
                             access = rule.get('access', '').lower()
                             direction = rule.get('direction', '').lower()
                             
-                            # Check for DenyAllInbound rule with priority 65000
-                            if (priority == 65000 and 
-                                direction == 'inbound' and 
+                            # Check for DenyAllInbound rules
+                            if (direction == 'inbound' and 
                                 access == 'deny' and 
-                                rule_name.lower() in ['denyallinbound', 'denyallinboundtraffic']):
-                                deny_all_inbound_found = True
-                                nsgs_with_deny_all_inbound += 1
-                                self.formatter.print_success(f"Found DenyAllInbound rule: {rule_name} (Priority: {priority})")
-                                break
+                                rule_name.lower() in ['denyall', 'denyallinbound', 'denyallinboundtraffic']):
+                                
+                                if priority == 65000:
+                                    deny_all_inbound_found = True
+                                    nsgs_with_deny_all_inbound += 1
+                                    self.formatter.print_success(f"Found DenyAllInbound rule: {rule_name} (Priority: {priority})")
+                                    break
+                                else:
+                                    misconfigured_deny_all_inbound = True
+                                    self.formatter.print_error(f"⚠️  MISCONFIGURED: Found DenyAllInbound rule '{rule_name}' with incorrect priority {priority} (should be 65000)")
                         
-                        if not deny_all_inbound_found:
+                        if not deny_all_inbound_found and not misconfigured_deny_all_inbound:
                             self.formatter.print_error(f"Missing DenyAllInbound rule with priority 65000")
                         
                         # Check custom security rules for ASG references
@@ -6182,8 +6574,8 @@ class SecurityFunctions:
                             self.formatter.print_info("No ASG-to-ASG rules found in this NSG")
                         
                         self.formatter.print_separator()
-                    else:
-                        self.formatter.print_error(f"Failed to retrieve NSGs: {nsg_response.status_code}")
+            else:
+                self.formatter.print_error(f"Failed to retrieve NSGs: {nsg_response.status_code}")
             
             # 2. List all ASGs and their usage
             self.formatter.print_subsection("APPLICATION SECURITY GROUPS (ASG) INVENTORY")
@@ -6324,9 +6716,8 @@ class SecurityFunctions:
             | where LastSeen < ago(1h)
             | take {max_lines}
             """
-            url = f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.OperationalInsights/workspaces/{workspace_name}/api/query?api-version=2020-08-01"
-            payload = {"query": query, "timespan": "P1D"}
-            response = self.api_client.arm_post(url, payload)
+            workspace_id = self.api_client.get_workspace_id(subscription_id, resource_group, workspace_name)
+            response = self.api_client.log_analytics_query(workspace_id, query, "P1D")
             if response.status_code == 200:
                 tables = response.json().get('tables', [])
                 if tables and tables[0].get('rows'):
@@ -6350,100 +6741,228 @@ class SecurityFunctions:
         # 2. MFA Activity
         self.formatter.print_subsection("MFA ACTIVITY")
         try:
-            # Use Microsoft Graph API for Azure AD sign-in logs - limit to recent data
-            graph_url = f"/auditLogs/signIns?$top=50&$orderby=createdDateTime desc"
-            response = self.api_client.graph_get(graph_url)
+            # Check if this is a government cloud environment
+            is_government = getattr(self.config, 'is_government_cloud', False)
+            
+            if is_government:
+                # Government cloud - use audit logs directly (sign-in logs not available)
+                audit_url = f"/auditLogs/directoryAudits?$top=50&$orderby=activityDateTime desc"
+                response = self.api_client.graph_get(audit_url)
+            else:
+                # Commercial cloud - try sign-in logs first, then fallback to audit logs
+                try:
+                    signin_url = f"/reports/signIns?$top=50&$orderby=createdDateTime desc"
+                    response = self.api_client.graph_get(signin_url)
+                    
+                    if response.status_code == 200:
+                        signins = response.json().get('value', [])
+                        # Filter for MFA sign-ins in the response (only check first 20 for performance)
+                        max_subitems = getattr(self.config, 'max_subitems', 10)
+                        mfa_signins = []
+                        for s in signins[:20]:  # Limit to first 20 for performance
+                            if s.get('authenticationRequirement') == 'multiFactorAuthentication':
+                                mfa_signins.append(s)
+                        if mfa_signins:
+                            self.formatter.print_success(f"Found {len(mfa_signins)} recent MFA sign-ins.")
+                            for signin in mfa_signins[:max_subitems]:  # Show first max_subitems
+                                user = signin.get('userPrincipalName', 'Unknown')
+                                app = signin.get('appDisplayName', 'Unknown')
+                                self.formatter.print_key_value(f"MFA Sign-in", f"{user} via {app}")
+                            if len(mfa_signins) > max_subitems:
+                                self.formatter.print_info(f"... and {len(mfa_signins) - max_subitems} more MFA sign-ins.")
+                        else:
+                            self.formatter.print_info("No recent MFA sign-ins found.")
+                        return  # Success, exit early
+                    else:
+                        # Sign-in logs failed, fallback to audit logs
+                        self.formatter.print_info("Sign-in logs endpoint not available, trying audit logs...")
+                except:
+                    # Exception occurred, fallback to audit logs
+                    self.formatter.print_info("Sign-in logs endpoint not available, trying audit logs...")
+                
+                # Fallback to audit logs for commercial cloud
+                audit_url = f"/auditLogs/directoryAudits?$top=50&$orderby=activityDateTime desc"
+                response = self.api_client.graph_get(audit_url)
+            
             if response.status_code == 200:
-                signins = response.json().get('value', [])
-                # Filter for MFA sign-ins in the response (only check first 20 for performance)
-                mfa_signins = []
-                for s in signins[:20]:  # Limit to first 20 for performance
-                    if s.get('authenticationRequirement') == 'multiFactorAuthentication':
-                        mfa_signins.append(s)
-                if mfa_signins:
-                    self.formatter.print_success(f"Found {len(mfa_signins)} recent MFA sign-ins.")
-                    for signin in mfa_signins[:5]:  # Show first 5
-                        user = signin.get('userPrincipalName', 'Unknown')
-                        app = signin.get('appDisplayName', 'Unknown')
-                        self.formatter.print_key_value(f"MFA Sign-in", f"{user} via {app}")
-                    if len(mfa_signins) > 5:
-                        self.formatter.print_info(f"... and {len(mfa_signins) - 5} more MFA sign-ins.")
+                audits = response.json().get('value', [])
+                # Filter for MFA-related activities
+                mfa_audits = []
+                for audit in audits:
+                    activity = audit.get('activityDisplayName', '').lower()
+                    if any(keyword in activity for keyword in ['mfa', 'multi-factor', 'authentication', 'sign']):
+                        mfa_audits.append(audit)
+                
+                if mfa_audits:
+                    self.formatter.print_success(f"Found {len(mfa_audits)} recent MFA-related audit events.")
+                    max_subitems = getattr(self.config, 'max_subitems', 10)
+                    for audit in mfa_audits[:max_subitems]:  # Show first max_subitems
+                        activity = audit.get('activityDisplayName', 'Unknown')
+                        initiated_by = audit.get('initiatedBy', {})
+                        user = initiated_by.get('user', {}).get('userPrincipalName', 'Unknown') if initiated_by.get('user') else 'Unknown'
+                        self.formatter.print_key_value(f"MFA Activity", f"{user} - {activity}")
+                    if len(mfa_audits) > max_subitems:
+                        self.formatter.print_info(f"... and {len(mfa_audits) - max_subitems} more MFA activities.")
                 else:
-                    self.formatter.print_info("No recent MFA sign-ins found.")
+                    self.formatter.print_info("No recent MFA activities found in audit logs.")
             elif response.status_code == 403:
-                self.formatter.print_warning("Access denied to Azure AD sign-in logs.")
-                self.formatter.print_info("Required permissions: SignInLog.Read.All or AuditLog.Read.All")
+                self.formatter.print_warning("Access denied to Azure AD audit logs.")
+                self.formatter.print_info("Required permissions: AuditLog.Read.All")
                 self.formatter.print_info("To fix: Grant admin consent for the required Microsoft Graph permissions.")
             else:
-                self.formatter.print_error("Failed to query Azure AD sign-in logs for MFA activity.")
-                self.formatter.print_info("This may indicate: Azure AD Premium P1/P2 not enabled, sign-in logs not configured, or insufficient permissions.")
+                self.formatter.print_error("Failed to query Azure AD audit logs for MFA activity.")
+                self.formatter.print_info("This may indicate: Azure AD Premium P1/P2 not enabled, audit logs not configured, or insufficient permissions.")
                 self.formatter.print_info(f"Response: {response.text}")
         except Exception as e:
-            self.formatter.print_error(f"Exception querying Azure AD sign-in logs: {e}")
-            self.formatter.print_info("Prerequisites: Azure AD Premium license required with sign-in logs enabled.")
+            self.formatter.print_error(f"Exception querying Azure AD audit logs: {e}")
+            self.formatter.print_info("Prerequisites: Azure AD Premium license required with audit logs enabled.")
 
         # 3. Configuration Baselines
         self.formatter.print_subsection("CONFIGURATION BASELINES")
         try:
-            query = f"""
-            ConfigurationChange
-            | where TimeGenerated > ago(1d)
-            | take {max_lines}
-            """
-            payload = {"query": query, "timespan": "P1D"}
-            response = self.api_client.arm_post(url, payload)
-            if response.status_code == 200:
-                tables = response.json().get('tables', [])
-                if tables and tables[0].get('rows'):
-                    self.formatter.print_success(f"Found {len(tables[0]['rows'])} recent configuration changes.")
-                else:
-                    self.formatter.print_info("No recent configuration changes found.")
-            elif response.status_code == 403:
-                self.formatter.print_warning("Access denied to Log Analytics workspace.")
-                self.formatter.print_info("Required permissions: Log Analytics Reader or Contributor role")
-                self.formatter.print_info("To fix: Assign the role to service principal at the workspace level.")
-            else:
-                self.formatter.print_error("Failed to query ConfigurationChange table.")
-                self.formatter.print_info("This may indicate: Change Tracking solution not enabled, no monitored resources, or insufficient workspace permissions.")
-                self.formatter.print_info(f"Response: {response.text}")
+            # Try multiple tables that might contain configuration changes
+            queries = [
+                {
+                    "query": f"""
+                    AzureActivity
+                    | where TimeGenerated > ago(1d)
+                    | where OperationName contains "write" or OperationName contains "create" or OperationName contains "update"
+                    | take {max_lines}
+                    """,
+                    "name": "AzureActivity",
+                    "description": "Azure Activity logs"
+                },
+                {
+                    "query": f"""
+                    Event
+                    | where TimeGenerated > ago(1d)
+                    | where EventID == 8003 or EventID == 8004 or EventID == 8005
+                    | take {max_lines}
+                    """,
+                    "name": "Event",
+                    "description": "Windows Event logs"
+                },
+                {
+                    "query": f"""
+                    SecurityEvent
+                    | where TimeGenerated > ago(1d)
+                    | where EventID == 4719 or EventID == 4738 or EventID == 4739
+                    | take {max_lines}
+                    """,
+                    "name": "SecurityEvent",
+                    "description": "Windows Security Event logs"
+                }
+            ]
+            
+            config_changes_found = False
+            for query_info in queries:
+                try:
+                    response = self.api_client.log_analytics_query(workspace_id, query_info["query"], "P1D")
+                    if response.status_code == 200:
+                        tables = response.json().get('tables', [])
+                        if tables and tables[0].get('rows'):
+                            self.formatter.print_success(f"Found {len(tables[0]['rows'])} recent configuration changes in {query_info['description']}.")
+                            config_changes_found = True
+                            break
+                    elif response.status_code == 400:
+                        # Table doesn't exist or query syntax error - continue to next query
+                        self.formatter.print_info(f"Table {query_info['name']} not available or query failed - trying next option...")
+                        continue
+                    else:
+                        # Other error - log but continue
+                        self.formatter.print_warning(f"Query for {query_info['name']} returned status {response.status_code}")
+                        continue
+                except Exception as e:
+                    # Individual query failed - continue to next one
+                    self.formatter.print_info(f"Query for {query_info['name']} failed: {str(e)[:100]}... - trying next option...")
+                    continue
+            
+            if not config_changes_found:
+                self.formatter.print_info("No recent configuration changes found.")
+                self.formatter.print_info("This may indicate: No configuration changes occurred, required data sources not enabled, or tables not available in workspace.")
+                
         except Exception as e:
-            self.formatter.print_error(f"Exception querying ConfigurationChange table: {e}")
-            self.formatter.print_info("Prerequisites: Change Tracking solution must be enabled in Log Analytics workspace.")
+            self.formatter.print_error(f"Exception querying configuration changes: {e}")
+            self.formatter.print_info("Prerequisites: Azure Activity logs or Event logs must be enabled.")
 
         # 4. Failed Logins
         self.formatter.print_subsection("FAILED LOGINS")
         try:
-            # Use Microsoft Graph API for Azure AD sign-in logs - limit to recent data
-            graph_url = f"/auditLogs/signIns?$top=50&$orderby=createdDateTime desc"
-            response = self.api_client.graph_get(graph_url)
+            # Check if this is a government cloud environment
+            is_government = getattr(self.config, 'is_government_cloud', False)
+            
+            if is_government:
+                # Government cloud - use audit logs directly (sign-in logs not available)
+                audit_url = f"/auditLogs/directoryAudits?$top=50&$orderby=activityDateTime desc"
+                response = self.api_client.graph_get(audit_url)
+            else:
+                # Commercial cloud - try sign-in logs first, then fallback to audit logs
+                try:
+                    signin_url = f"/reports/signIns?$top=50&$orderby=createdDateTime desc"
+                    response = self.api_client.graph_get(signin_url)
+                    
+                    if response.status_code == 200:
+                        signins = response.json().get('value', [])
+                        # Filter for failed logins in the response (only check first 20 for performance)
+                        max_subitems = getattr(self.config, 'max_subitems', 10)
+                        failed_signins = []
+                        for s in signins[:20]:  # Limit to first 20 for performance
+                            if s.get('status', {}).get('errorCode', 0) != 0:
+                                failed_signins.append(s)
+                        if failed_signins:
+                            self.formatter.print_success(f"Found {len(failed_signins)} failed logins.")
+                            for signin in failed_signins[:max_subitems]:  # Show first max_subitems
+                                user = signin.get('userPrincipalName', 'Unknown')
+                                error = signin.get('status', {}).get('errorCode', 'Unknown')
+                                self.formatter.print_key_value(f"Failed Login", f"{user} - Error: {error}")
+                            if len(failed_signins) > max_subitems:
+                                self.formatter.print_info(f"... and {len(failed_signins) - max_subitems} more failed logins.")
+                        else:
+                            self.formatter.print_info("No failed logins found.")
+                        return  # Success, exit early
+                    else:
+                        # Sign-in logs failed, fallback to audit logs
+                        self.formatter.print_info("Sign-in logs endpoint not available, trying audit logs...")
+                except:
+                    # Exception occurred, fallback to audit logs
+                    self.formatter.print_info("Sign-in logs endpoint not available, trying audit logs...")
+                
+                # Fallback to audit logs for commercial cloud
+                audit_url = f"/auditLogs/directoryAudits?$top=50&$orderby=activityDateTime desc"
+                response = self.api_client.graph_get(audit_url)
+            
             if response.status_code == 200:
-                signins = response.json().get('value', [])
-                # Filter for failed logins in the response (only check first 20 for performance)
-                failed_signins = []
-                for s in signins[:20]:  # Limit to first 20 for performance
-                    if s.get('status', {}).get('errorCode', 0) != 0:
-                        failed_signins.append(s)
-                if failed_signins:
-                    self.formatter.print_success(f"Found {len(failed_signins)} failed logins.")
-                    for signin in failed_signins[:5]:  # Show first 5
-                        user = signin.get('userPrincipalName', 'Unknown')
-                        error = signin.get('status', {}).get('errorCode', 'Unknown')
-                        self.formatter.print_key_value(f"Failed Login", f"{user} - Error: {error}")
-                    if len(failed_signins) > 5:
-                        self.formatter.print_info(f"... and {len(failed_signins) - 5} more failed logins.")
+                audits = response.json().get('value', [])
+                # Filter for failed login activities
+                failed_audits = []
+                for audit in audits:
+                    activity = audit.get('activityDisplayName', '').lower()
+                    if any(keyword in activity for keyword in ['failed', 'error', 'unsuccessful', 'denied']):
+                        failed_audits.append(audit)
+                
+                if failed_audits:
+                    self.formatter.print_success(f"Found {len(failed_audits)} recent failed login audit events.")
+                    max_subitems = getattr(self.config, 'max_subitems', 10)
+                    for audit in failed_audits[:max_subitems]:  # Show first max_subitems
+                        activity = audit.get('activityDisplayName', 'Unknown')
+                        initiated_by = audit.get('initiatedBy', {})
+                        user = initiated_by.get('user', {}).get('userPrincipalName', 'Unknown') if initiated_by.get('user') else 'Unknown'
+                        self.formatter.print_key_value(f"Failed Login", f"{user} - {activity}")
+                    if len(failed_audits) > max_subitems:
+                        self.formatter.print_info(f"... and {len(failed_audits) - max_subitems} more failed login events.")
                 else:
-                    self.formatter.print_info("No failed logins found.")
+                    self.formatter.print_info("No recent failed login events found in audit logs.")
             elif response.status_code == 403:
-                self.formatter.print_warning("Access denied to Azure AD sign-in logs.")
-                self.formatter.print_info("Required permissions: SignInLog.Read.All or AuditLog.Read.All")
+                self.formatter.print_warning("Access denied to Azure AD audit logs.")
+                self.formatter.print_info("Required permissions: AuditLog.Read.All")
                 self.formatter.print_info("To fix: Grant admin consent for the required Microsoft Graph permissions.")
             else:
-                self.formatter.print_error("Failed to query Azure AD sign-in logs for failed logins.")
-                self.formatter.print_info("This may indicate: Azure AD Premium P1/P2 not enabled, sign-in logs not configured, or insufficient permissions.")
+                self.formatter.print_error("Failed to query Azure AD audit logs for failed logins.")
+                self.formatter.print_info("This may indicate: Azure AD Premium P1/P2 not enabled, audit logs not configured, or insufficient permissions.")
                 self.formatter.print_info(f"Response: {response.text}")
         except Exception as e:
-            self.formatter.print_error(f"Exception querying Azure AD sign-in logs for failed logins: {e}")
-            self.formatter.print_info("Prerequisites: Azure AD Premium license required with sign-in logs enabled.")
+            self.formatter.print_error(f"Exception querying Azure AD audit logs for failed logins: {e}")
+            self.formatter.print_info("Prerequisites: Azure AD Premium license required with audit logs enabled.")
 
         # 5. Data Feed Status
         self.formatter.print_subsection("DATA FEED STATUS")
@@ -6473,31 +6992,52 @@ class SecurityFunctions:
 
         # 6. External and Internal Connections Monitoring
         self.formatter.print_subsection("EXTERNAL AND INTERNAL CONNECTIONS MONITORING")
-        try:
-            query = f"""
-            AzureNetworkAnalytics_CL
-            | where TimeGenerated > ago(1d)
-            | take {max_lines}
-            """
-            payload = {"query": query, "timespan": "P1D"}
-            response = self.api_client.arm_post(url, payload)
-            if response.status_code == 200:
-                tables = response.json().get('tables', [])
-                if tables and tables[0].get('rows'):
-                    self.formatter.print_success(f"Found {len(tables[0]['rows'])} recent network connection records.")
+        
+        # Try multiple tables that might contain network connection data
+        queries = [
+            ("AzureActivity", f"""
+                AzureActivity
+                | where TimeGenerated > ago(1d)
+                | where ResourceProvider == "Microsoft.Network"
+                | take {max_lines}
+                """),
+            ("Event", f"""
+                Event
+                | where TimeGenerated > ago(1d)
+                | where EventID == 5156 or EventID == 5157
+                | take {max_lines}
+                """),
+            ("SecurityEvent", f"""
+                SecurityEvent
+                | where TimeGenerated > ago(1d)
+                | where EventID == 4624 or EventID == 4625
+                | take {max_lines}
+                """)
+        ]
+        
+        network_records_found = False
+        for table_name, query in queries:
+            try:
+                response = self.api_client.log_analytics_query(workspace_id, query, "P1D")
+                if response.status_code == 200:
+                    tables = response.json().get('tables', [])
+                    if tables and tables[0].get('rows'):
+                        self.formatter.print_success(f"Found {len(tables[0]['rows'])} recent network connection records in {table_name}.")
+                        network_records_found = True
+                        break
+                elif response.status_code == 400:
+                    # Table doesn't exist or query is invalid - try next table
+                    continue
                 else:
-                    self.formatter.print_info("No recent network connection records found.")
-            elif response.status_code == 403:
-                self.formatter.print_warning("Access denied to Log Analytics workspace.")
-                self.formatter.print_info("Required permissions: Log Analytics Reader or Contributor role")
-                self.formatter.print_info("To fix: Assign the role to service principal at the workspace level.")
-            else:
-                self.formatter.print_error("Failed to query AzureNetworkAnalytics_CL.")
-                self.formatter.print_info("This may indicate: Network Watcher not enabled, network analytics not configured, or no network resources being monitored.")
-                self.formatter.print_info(f"Response: {response.text}")
-        except Exception as e:
-            self.formatter.print_error(f"Exception querying AzureNetworkAnalytics_CL: {e}")
-            self.formatter.print_info("Prerequisites: Network Watcher must be enabled with network analytics configured.")
+                    self.formatter.print_warning(f"Query failed for {table_name}: {response.status_code}")
+                    continue
+            except Exception as e:
+                # Individual query failed - try next table
+                continue
+        
+        if not network_records_found:
+            self.formatter.print_info("No recent network connection records found.")
+            self.formatter.print_info("Prerequisites: Azure Activity logs or Event logs must be enabled.")
 
         # 7. Root/Administrative Account Activity
         self.formatter.print_subsection("ROOT/ADMINISTRATIVE ACCOUNT ACTIVITY")
@@ -6520,7 +7060,8 @@ class SecurityFunctions:
                 
                 if admin_audits:
                     self.formatter.print_success(f"Found {len(admin_audits)} recent root/admin activities.")
-                    for audit in admin_audits[:5]:  # Show first 5
+                    max_subitems = getattr(self.config, 'max_subitems', 10)
+                    for audit in admin_audits[:max_subitems]:  # Show first max_subitems
                         initiated_by = audit.get('initiatedBy')
                         if initiated_by:
                             user_obj = initiated_by.get('user')
@@ -6529,8 +7070,8 @@ class SecurityFunctions:
                             user = 'Unknown'
                         activity = audit.get('activityDisplayName', 'Unknown')
                         self.formatter.print_key_value(f"Admin Activity", f"{user} - {activity}")
-                    if len(admin_audits) > 5:
-                        self.formatter.print_info(f"... and {len(admin_audits) - 5} more admin activities.")
+                    if len(admin_audits) > max_subitems:
+                        self.formatter.print_info(f"... and {len(admin_audits) - max_subitems} more admin activities.")
                 else:
                     self.formatter.print_info("No recent root/admin activities found.")
             elif response.status_code == 403:
@@ -6562,7 +7103,8 @@ class SecurityFunctions:
                 
                 if permission_audits:
                     self.formatter.print_success(f"Found {len(permission_audits)} recent permission/object changes.")
-                    for audit in permission_audits[:5]:  # Show first 5
+                    max_subitems = getattr(self.config, 'max_subitems', 10)
+                    for audit in permission_audits[:max_subitems]:  # Show first max_subitems
                         initiated_by = audit.get('initiatedBy')
                         if initiated_by:
                             user_obj = initiated_by.get('user')
@@ -6571,8 +7113,8 @@ class SecurityFunctions:
                             user = 'Unknown'
                         activity = audit.get('activityDisplayName', 'Unknown')
                         self.formatter.print_key_value(f"Permission/Object Change", f"{user} - {activity}")
-                    if len(permission_audits) > 5:
-                        self.formatter.print_info(f"... and {len(permission_audits) - 5} more permission/object changes.")
+                    if len(permission_audits) > max_subitems:
+                        self.formatter.print_info(f"... and {len(permission_audits) - max_subitems} more permission/object changes.")
                 else:
                     self.formatter.print_info("No recent permission/object changes found.")
             elif response.status_code == 403:
@@ -6619,10 +7161,11 @@ class SecurityFunctions:
                         if items_response.status_code == 200:
                             items = items_response.json().get('value', [])
                             self.formatter.print_key_value(f"{kind} Count", str(len(items)))
-                            for item in items[:5]:
+                            max_subitems = getattr(self.config, 'max_subitems', 10)
+                            for item in items[:max_subitems]:
                                 self.formatter.print_key_value(f"{kind[:-1]}", item.get('id', 'Unknown'))
-                            if len(items) > 5:
-                                self.formatter.print_info(f"... and {len(items) - 5} more {kind.lower()}.")
+                            if len(items) > max_subitems:
+                                self.formatter.print_info(f"... and {len(items) - max_subitems} more {kind.lower()}.")
                         else:
                             self.formatter.print_error(f"Failed to list {kind.lower()} for {name}.")
                     self.formatter.print_separator()
@@ -6968,6 +7511,11 @@ class SecurityFunctions:
             # Query all PIM eligibility schedules
             url = "/roleManagement/directory/roleEligibilitySchedules"
             response = self.api_client.graph_get(url)
+            
+            # Check for license requirement error
+            if self._handle_pim_license_error(response):
+                return
+            
             if response.status_code == 200:
                 schedules = response.json().get('value', [])
                 found = False
@@ -7017,6 +7565,11 @@ class SecurityFunctions:
             # Query all active PIM role assignments
             url = f"/roleManagement/directory/roleAssignmentScheduleInstances?$top={max_lines}"
             response = self.api_client.graph_get(url)
+            
+            # Check for license requirement error
+            if self._handle_pim_license_error(response):
+                return
+            
             if response.status_code == 200:
                 assignments = response.json().get('value', [])
                 if not assignments:
@@ -7070,15 +7623,38 @@ class SecurityFunctions:
             url = "/identity/conditionalAccess/policies"
             response = self.api_client.graph_get(url)
             if response.status_code == 200:
-                policies = response.json().get('value', [])
+                # Add null check for response.json()
+                response_data = response.json()
+                if response_data is None:
+                    self.formatter.print_error("Failed to parse response data - response is None")
+                    self.formatter.print_separator()
+                    return
+                
+                policies = response_data.get('value', [])
+                if policies is None:
+                    policies = []
+                
                 found = False
                 for policy in policies:
+                    if not isinstance(policy, dict):
+                        continue
+                        
                     display_name = policy.get('displayName', '')
+                    if display_name is None:
+                        display_name = ''
+                    
                     grant_controls = policy.get('grantControls', {})
+                    if grant_controls is None:
+                        grant_controls = {}
+                    
                     built_in_controls = grant_controls.get('builtInControls', [])
+                    if built_in_controls is None:
+                        built_in_controls = []
+                    
                     if 'mfa' in built_in_controls and 'ssh' in display_name.lower():
                         found = True
                         self.formatter.print_success(f"MFA required for SSH sessions by policy: {display_name}")
+                
                 if not found:
                     self.formatter.print_warning("No Conditional Access policy found requiring MFA for SSH sessions.")
             else:
@@ -7142,7 +7718,15 @@ class SecurityFunctions:
             risk_users_url = f"/identityProtection/riskyUsers?$top={max_items}"
             risk_users_resp = self.api_client.graph_get(risk_users_url)
             if risk_users_resp.status_code != 200:
-                self.formatter.print_error(f"Failed to retrieve risky users: {risk_users_resp.status_code}")
+                # Check for licensing error specifically
+                if self._handle_identity_protection_license_error(risk_users_resp):
+                    self.formatter.print_separator()
+                    return
+                else:
+                    self.formatter.print_error(f"Failed to retrieve risky users: {risk_users_resp.status_code}")
+                    error_data = risk_users_resp.json()
+                    if error_data:
+                        self.formatter.print_info(f"Error details: {error_data.get('error', {}).get('message', 'Unknown error')}")
                 self.formatter.print_separator()
                 return
             # Only include users where riskLevel is not None
@@ -7963,7 +8547,8 @@ class SecurityFunctions:
                         if conn_response.status_code == 200:
                             connections = conn_response.json().get('value', [])
                             self.formatter.print_key_value("Connections", len(connections))
-                            for conn in connections[:3]:  # Show first 3 connections
+                            max_subitems = getattr(self.config, 'max_subitems', 10)
+                            for conn in connections[:max_subitems]:  # Show first max_subitems connections
                                 conn_name = conn.get('name', 'Unnamed')
                                 conn_props = conn.get('properties', {})
                                 conn_status = conn_props.get('connectionStatus', 'Unknown')
@@ -8206,13 +8791,23 @@ class SecurityFunctions:
             url = f"/subscriptions/{subscription_id}/providers/Microsoft.Network/routeTables?api-version=2022-09-01"
             response = self.api_client.arm_get(url)
             if response.status_code == 200:
-                route_tables = response.json().get('value', [])
+                response_data = response.json()
+                if response_data is None:
+                    self.formatter.print_error("Failed to parse response data - response is None")
+                    return
+                    
+                route_tables = response_data.get('value', [])
+                if route_tables is None:
+                    route_tables = []
+                    
                 if not route_tables:
                     self.formatter.print_warning("No route tables found in this subscription.")
                 else:
                     self.formatter.print_success(f"Found {len(route_tables)} route tables")
                     
                     for route_table in route_tables:
+                        if not isinstance(route_table, dict):
+                            continue
                         total_route_tables += 1
                         table_name = route_table.get('name', 'Unknown')
                         table_id = route_table.get('id', '')
@@ -8222,7 +8817,14 @@ class SecurityFunctions:
                         self.formatter.print_key_value("Location", location)
                         
                         # Check routes in this table
-                        routes = route_table.get('properties', {}).get('routes', [])
+                        properties = route_table.get('properties', {})
+                        if properties is None:
+                            properties = {}
+                            
+                        routes = properties.get('routes', [])
+                        if routes is None:
+                            routes = []
+                            
                         if not routes:
                             self.formatter.print_warning("No routes configured in this route table")
                             missing_firewall_routes.append(f"Route Table {table_name}: No routes configured")
@@ -8235,10 +8837,27 @@ class SecurityFunctions:
                         firewall_ips = []
                         
                         for route in routes:
+                            if not isinstance(route, dict):
+                                continue
                             route_name = route.get('name', 'Unnamed')
-                            address_prefix = route.get('properties', {}).get('addressPrefix', 'Unknown')
-                            next_hop_type = route.get('properties', {}).get('nextHopType', 'Unknown')
-                            next_hop_ip = route.get('properties', {}).get('nextHopIpAddress', 'Not specified')
+                            if route_name is None:
+                                route_name = 'Unnamed'
+                                
+                            route_properties = route.get('properties', {})
+                            if route_properties is None:
+                                route_properties = {}
+                                
+                            address_prefix = route_properties.get('addressPrefix', 'Unknown')
+                            if address_prefix is None:
+                                address_prefix = 'Unknown'
+                                
+                            next_hop_type = route_properties.get('nextHopType', 'Unknown')
+                            if next_hop_type is None:
+                                next_hop_type = 'Unknown'
+                                
+                            next_hop_ip = route_properties.get('nextHopIpAddress', 'Not specified')
+                            if next_hop_ip is None:
+                                next_hop_ip = 'Not specified'
                             
                             self.formatter.print_key_value(f"Route: {route_name}", f"{address_prefix} → {next_hop_type}")
                             if next_hop_ip != 'Not specified':
@@ -8261,11 +8880,18 @@ class SecurityFunctions:
                             missing_firewall_routes.append(f"Route Table {table_name}: Missing firewall route")
                         
                         # Check route table associations
-                        associations = route_table.get('properties', {}).get('subnets', [])
+                        associations = properties.get('subnets', [])
+                        if associations is None:
+                            associations = []
+                            
                         if associations:
                             self.formatter.print_success(f"Route table associated with {len(associations)} subnet(s)")
                             for subnet in associations:
+                                if not isinstance(subnet, dict):
+                                    continue
                                 subnet_name = subnet.get('name', 'Unknown')
+                                if subnet_name is None:
+                                    subnet_name = 'Unknown'
                                 self.formatter.print_key_value("Associated Subnet", subnet_name)
                         else:
                             self.formatter.print_warning("Route table not associated with any subnets")
@@ -8282,13 +8908,23 @@ class SecurityFunctions:
             url = f"/subscriptions/{subscription_id}/providers/Microsoft.Network/azureFirewalls?api-version=2022-09-01"
             response = self.api_client.arm_get(url)
             if response.status_code == 200:
-                firewalls = response.json().get('value', [])
+                response_data = response.json()
+                if response_data is None:
+                    self.formatter.print_error("Failed to parse response data - response is None")
+                    return
+                    
+                firewalls = response_data.get('value', [])
+                if firewalls is None:
+                    firewalls = []
+                    
                 if not firewalls:
                     self.formatter.print_warning("No Azure Firewalls found in this subscription.")
                 else:
                     self.formatter.print_success(f"Found {len(firewalls)} Azure Firewalls")
                     
                     for firewall in firewalls:
+                        if not isinstance(firewall, dict):
+                            continue
                         firewall_name = firewall.get('name', 'Unknown')
                         firewall_id = firewall.get('id', '')
                         location = firewall.get('location', 'Unknown')
@@ -8298,11 +8934,18 @@ class SecurityFunctions:
                         
                         # Check firewall IP addresses
                         properties = firewall.get('properties', {})
+                        if properties is None:
+                            properties = {}
+                            
                         ip_configurations = properties.get('ipConfigurations', [])
+                        if ip_configurations is None:
+                            ip_configurations = []
                         
                         if ip_configurations:
                             self.formatter.print_success(f"Found {len(ip_configurations)} IP configuration(s)")
                             for ip_config in ip_configurations:
+                                if not isinstance(ip_config, dict):
+                                    continue
                                 ip_config_name = ip_config.get('name', 'Unnamed')
                                 private_ip = ip_config.get('properties', {}).get('privateIPAddress', 'Not configured')
                                 public_ip = ip_config.get('properties', {}).get('publicIPAddress', {}).get('id', 'Not configured')
@@ -8360,7 +9003,15 @@ class SecurityFunctions:
             url = f"/subscriptions/{subscription_id}/providers/Microsoft.Network/networkSecurityGroups?api-version=2022-09-01"
             response = self.api_client.arm_get(url)
             if response.status_code == 200:
-                nsgs = response.json().get('value', [])
+                response_data = response.json()
+                if response_data is None:
+                    self.formatter.print_error("Failed to parse response data - response is None")
+                    return
+                    
+                nsgs = response_data.get('value', [])
+                if nsgs is None:
+                    nsgs = []
+                    
                 if not nsgs:
                     self.formatter.print_info("No Network Security Groups found in this subscription.")
                 else:
@@ -8370,6 +9021,8 @@ class SecurityFunctions:
                     flow_logs_disabled = 0
                     
                     for nsg in nsgs:
+                        if not isinstance(nsg, dict):
+                            continue
                         nsg_name = nsg.get('name', 'Unknown')
                         nsg_id = nsg.get('id', '')
                         
@@ -8378,12 +9031,23 @@ class SecurityFunctions:
                         flow_logs_response = self.api_client.arm_get(flow_logs_url)
                         
                         if flow_logs_response.status_code == 200:
-                            flow_logs = flow_logs_response.json().get('value', [])
+                            flow_logs_data = flow_logs_response.json()
+                            if flow_logs_data is None:
+                                self.formatter.print_warning(f"NSG {nsg_name}: Could not parse flow logs response")
+                                flow_logs_disabled += 1
+                                continue
+                                
+                            flow_logs = flow_logs_data.get('value', [])
+                            if flow_logs is None:
+                                flow_logs = []
+                                
                             if flow_logs:
                                 flow_logs_enabled += 1
                                 self.formatter.print_success(f"NSG {nsg_name}: Flow logs enabled")
                                 
                                 for flow_log in flow_logs:
+                                    if not isinstance(flow_log, dict):
+                                        continue
                                     flow_log_name = flow_log.get('name', 'Unknown')
                                     flow_log_props = flow_log.get('properties', {})
                                     enabled = flow_log_props.get('enabled', False)
@@ -8431,17 +9095,43 @@ class SecurityFunctions:
                     diag_response = self.api_client.arm_get(diag_url)
                     
                     if diag_response.status_code == 200:
-                        diag_settings = diag_response.json().get('value', [])
+                        diag_data = diag_response.json()
+                        if diag_data is None:
+                            self.formatter.print_warning(f"Firewall {firewall_name}: Could not parse diagnostic settings response")
+                            continue
+                            
+                        diag_settings = diag_data.get('value', [])
+                        if diag_settings is None:
+                            diag_settings = []
+                            
                         if diag_settings:
                             self.formatter.print_success(f"Firewall {firewall_name}: Diagnostic settings configured")
                             
                             for setting in diag_settings:
+                                if not isinstance(setting, dict):
+                                    continue
                                 setting_name = setting.get('name', 'Unknown')
-                                logs = setting.get('properties', {}).get('logs', [])
+                                if setting_name is None:
+                                    setting_name = 'Unknown'
+                                    
+                                setting_properties = setting.get('properties', {})
+                                if setting_properties is None:
+                                    setting_properties = {}
+                                    
+                                logs = setting_properties.get('logs', [])
+                                if logs is None:
+                                    logs = []
                                 
                                 # Check for firewall logs
-                                firewall_logs = [log for log in logs if any(keyword in log.get('category', '').lower() 
-                                               for keyword in ['firewall', 'network', 'traffic'])]
+                                firewall_logs = []
+                                for log in logs:
+                                    if not isinstance(log, dict):
+                                        continue
+                                    category = log.get('category', '')
+                                    if category is None:
+                                        category = ''
+                                    if any(keyword in category.lower() for keyword in ['firewall', 'network', 'traffic']):
+                                        firewall_logs.append(log)
                                 
                                 if firewall_logs:
                                     self.formatter.print_success(f"Diagnostic setting '{setting_name}' includes firewall logs")
@@ -8464,17 +9154,44 @@ class SecurityFunctions:
                     diag_response = self.api_client.arm_get(diag_url)
                     
                     if diag_response.status_code == 200:
-                        diag_settings = diag_response.json().get('value', [])
+                        diag_data = diag_response.json()
+                        if diag_data is None:
+                            self.formatter.print_warning(f"NSG {nsg_name}: Could not parse diagnostic settings response")
+                            continue
+                            
+                        diag_settings = diag_data.get('value', [])
+                        if diag_settings is None:
+                            diag_settings = []
+                            
                         if diag_settings:
                             self.formatter.print_success(f"NSG {nsg_name}: Diagnostic settings configured")
                             
                             for setting in diag_settings:
+                                if not isinstance(setting, dict):
+                                    continue
+                                    
                                 setting_name = setting.get('name', 'Unknown')
-                                logs = setting.get('properties', {}).get('logs', [])
+                                if setting_name is None:
+                                    setting_name = 'Unknown'
+                                    
+                                setting_properties = setting.get('properties', {})
+                                if setting_properties is None:
+                                    setting_properties = {}
+                                    
+                                logs = setting_properties.get('logs', [])
+                                if logs is None:
+                                    logs = []
                                 
                                 # Check for NSG logs
-                                nsg_logs = [log for log in logs if any(keyword in log.get('category', '').lower() 
-                                           for keyword in ['nsg', 'network', 'security'])]
+                                nsg_logs = []
+                                for log in logs:
+                                    if not isinstance(log, dict):
+                                        continue
+                                    category = log.get('category', '')
+                                    if category is None:
+                                        category = ''
+                                    if any(keyword in category.lower() for keyword in ['nsg', 'network', 'security']):
+                                        nsg_logs.append(log)
                                 
                                 if nsg_logs:
                                     self.formatter.print_success(f"Diagnostic setting '{setting_name}' includes NSG logs")
@@ -8521,6 +9238,147 @@ class SecurityFunctions:
         
         self.formatter.print_separator()
 
+    def check_group_membership(self):
+        """List all Microsoft Entra ID groups and the members assigned to each group, with a table of member details and their roles. List users not in any group separately. Limit number of groups displayed with max_subitems config."""
+        self.formatter.print_header(
+            "MICROSOFT ENTRA ID GROUP MEMBERSHIP",
+            "This function lists all Microsoft Entra ID groups and the members assigned to each group, with a table of member details and their roles. Users not part of any group are listed separately."
+        )
+        try:
+            max_items = getattr(self.config, 'max_lines', 100)
+            max_groups = getattr(self.config, 'max_subitems', 10)
+            
+            # Get all groups with better error handling
+            groups_response = self.api_client.graph_get(f"/groups?$top={max_groups}&$select=id,displayName,description,mailEnabled,securityEnabled")
+            if groups_response.status_code != 200:
+                # Try alternative approach with different parameters
+                groups_response = self.api_client.graph_get(f"/groups?$top={max_groups}")
+                if groups_response.status_code != 200:
+                    self.formatter.print_error(f"Failed to retrieve groups: {groups_response.status_code}")
+                    self.formatter.print_error(f"Response: {groups_response.text}")
+                    self.formatter.print_info("This may indicate insufficient Graph API permissions or the tenant doesn't have any groups")
+                    return
+            
+            groups = groups_response.json().get('value', [])
+            if not groups:
+                self.formatter.print_info("No groups found in the tenant")
+                return
+                
+            # Get all users with better error handling
+            users_response = self.api_client.graph_get(f"/users?$top={max_items}&$select=id,displayName,userPrincipalName,mail")
+            if users_response.status_code != 200:
+                # Try alternative approach
+                users_response = self.api_client.graph_get(f"/users?$top={max_items}")
+                if users_response.status_code != 200:
+                    self.formatter.print_error(f"Failed to retrieve users: {users_response.status_code}")
+                    self.formatter.print_error(f"Response: {users_response.text}")
+                    self.formatter.print_info("This may indicate insufficient Graph API permissions")
+                    return
+            
+            users = users_response.json().get('value', [])
+            user_id_map = {u['id']: u for u in users}
+            user_groups_map = {u['id']: [] for u in users}
+            all_member_ids = set()
+            
+            # For each group, print group and table of members (limit to max_groups)
+            for group in groups[:max_groups]:
+                group_id = group.get('id')
+                group_name = group.get('displayName', 'Unnamed Group')
+                group_description = group.get('description', 'No description')
+                mail_enabled = group.get('mailEnabled', False)
+                security_enabled = group.get('securityEnabled', False)
+                
+                self.formatter.print_section_header(f"Group: {group_name}")
+                self.formatter.print_key_value("Description", group_description)
+                self.formatter.print_key_value("Mail Enabled", str(mail_enabled))
+                self.formatter.print_key_value("Security Enabled", str(security_enabled))
+                
+                # Get members with better error handling
+                members_response = self.api_client.graph_get(f"/groups/{group_id}/members?$top={max_items}&$select=id,displayName,userPrincipalName,mail")
+                if members_response.status_code != 200:
+                    self.formatter.print_error(f"Failed to retrieve members for group {group_name}: {members_response.status_code}")
+                    self.formatter.print_error(f"Response: {members_response.text}")
+                    continue
+                
+                members = members_response.json().get('value', [])
+                if not members:
+                    self.formatter.print_info("(No members assigned)")
+                    continue
+                
+                table_rows = []
+                for m in members[:max_items]:
+                    member_id = m.get('id')
+                    all_member_ids.add(member_id)
+                    
+                    # Add this group to the user's groups
+                    if member_id in user_groups_map:
+                        user_groups_map[member_id].append(group_name)
+                    
+                    # Get roles for this member (directory roles) with better error handling
+                    roles_response = self.api_client.graph_get(f"/users/{member_id}/memberOf?$top={max_items}&$select=displayName")
+                    roles = []
+                    if roles_response.status_code == 200:
+                        roles_data = roles_response.json().get('value', [])
+                        roles = [r.get('displayName', '') for r in roles_data if r.get('@odata.type', '').endswith('directoryRole')]
+                    
+                    # Metadata
+                    upn = m.get('userPrincipalName', '')
+                    disp = m.get('displayName', '')
+                    mail = m.get('mail', '')
+                    typ = m.get('@odata.type', '').replace('#microsoft.graph.', '')
+                    
+                    table_rows.append([
+                        disp or upn or member_id,
+                        upn,
+                        mail,
+                        typ,
+                        ", ".join(roles) if roles else "(none)"
+                    ])
+                
+                if len(members) > max_items:
+                    self.formatter.print_info(f"Table truncated to first {max_items} members.")
+                
+                self.formatter.print_table([
+                    "Display Name", "User Principal Name", "Email", "Type", "Role(s)"
+                ], table_rows)
+                self.formatter.print_separator()
+            
+            # Users not in any group
+            not_in_group = [u for u in users if u['id'] not in all_member_ids]
+            if not_in_group:
+                self.formatter.print_section_header("Users not in any group")
+                table_rows = []
+                for u in not_in_group[:max_items]:
+                    # Get roles for this user (directory roles) with better error handling
+                    user_id = u.get('id')
+                    roles_response = self.api_client.graph_get(f"/users/{user_id}/memberOf?$top={max_items}&$select=displayName")
+                    roles = []
+                    if roles_response.status_code == 200:
+                        roles_data = roles_response.json().get('value', [])
+                        roles = [r.get('displayName', '') for r in roles_data if r.get('@odata.type', '').endswith('directoryRole')]
+                    
+                    table_rows.append([
+                        u.get('displayName', ''),
+                        u.get('userPrincipalName', ''),
+                        u.get('mail', ''),
+                        u.get('id', ''),
+                        ", ".join(roles) if roles else "(none)"
+                    ])
+                
+                if len(not_in_group) > max_items:
+                    self.formatter.print_info(f"Table truncated to first {max_items} users.")
+                
+                self.formatter.print_table([
+                    "Display Name", "User Principal Name", "Email", "Object ID", "Role(s)"
+                ], table_rows)
+            else:
+                self.formatter.print_info("All users are members of at least one group.")
+                
+        except Exception as e:
+            self.formatter.print_error(f"Exception occurred: {e}")
+            self.formatter.print_info("This may indicate Graph API permission issues or network connectivity problems")
+        self.formatter.print_separator()
+
     def check_microsoft_defender_for_devops(self):
         """Check Microsoft Defender for DevOps configuration for secret scanning and hardcoded credential detection."""
         self.formatter.print_header(
@@ -8555,7 +9413,8 @@ class SecurityFunctions:
                                 if repos:
                                     self.formatter.print_success(f"GitHub organization '{owner_name}' has {len(repos)} connected repositories")
                                     
-                                    for repo in repos[:5]:  # Show first 5 repos
+                                    max_subitems = getattr(self.config, 'max_subitems', 10)
+                                    for repo in repos[:max_subitems]:  # Show first max_subitems repos
                                         repo_name = repo.get('name', 'Unknown')
                                         repo_props = repo.get('properties', {})
                                         
@@ -8566,8 +9425,8 @@ class SecurityFunctions:
                                         else:
                                             self.formatter.print_warning(f"Repository '{repo_name}' is not onboarded (State: {onboarding_state})")
                                     
-                                    if len(repos) > 5:
-                                        self.formatter.print_info(f"... and {len(repos) - 5} more repositories")
+                                    if len(repos) > max_subitems:
+                                        self.formatter.print_info(f"... and {len(repos) - max_subitems} more repositories")
                                 else:
                                     self.formatter.print_warning(f"No repositories found for GitHub organization '{owner_name}'")
                             else:
@@ -8603,7 +9462,8 @@ class SecurityFunctions:
                                 if projects:
                                     self.formatter.print_success(f"Azure DevOps organization '{org_name}' has {len(projects)} connected projects")
                                     
-                                    for project in projects[:5]:  # Show first 5 projects
+                                    max_subitems = getattr(self.config, 'max_subitems', 10)
+                                    for project in projects[:max_subitems]:  # Show first max_subitems projects
                                         project_name = project.get('name', 'Unknown')
                                         project_props = project.get('properties', {})
                                         
@@ -8614,8 +9474,8 @@ class SecurityFunctions:
                                         else:
                                             self.formatter.print_warning(f"Project '{project_name}' is not onboarded (State: {onboarding_state})")
                                     
-                                    if len(projects) > 5:
-                                        self.formatter.print_info(f"... and {len(projects) - 5} more projects")
+                                    if len(projects) > max_subitems:
+                                        self.formatter.print_info(f"... and {len(projects) - max_subitems} more projects")
                                 else:
                                     self.formatter.print_warning(f"No projects found for Azure DevOps organization '{org_name}'")
                             else:
@@ -8651,14 +9511,15 @@ class SecurityFunctions:
                     
                     if devops_alerts:
                         self.formatter.print_warning(f"Found {len(devops_alerts)} DevOps-related security alerts")
-                        for alert in devops_alerts[:3]:  # Show first 3 alerts
+                        max_subitems = getattr(self.config, 'max_subitems', 10)
+                        for alert in devops_alerts[:max_subitems]:  # Show first max_subitems alerts
                             alert_props = alert.get('properties', {})
                             alert_name = alert_props.get('alertDisplayName', 'Unknown')
                             severity = alert_props.get('severity', 'Unknown')
                             self.formatter.print_key_value(f"Alert: {alert_name}", f"Severity: {severity}")
                         
-                        if len(devops_alerts) > 3:
-                            self.formatter.print_info(f"... and {len(devops_alerts) - 3} more DevOps-related alerts")
+                        if len(devops_alerts) > max_subitems:
+                            self.formatter.print_info(f"... and {len(devops_alerts) - max_subitems} more DevOps-related alerts")
                     else:
                         self.formatter.print_success("No DevOps-related security alerts found")
                 else:
